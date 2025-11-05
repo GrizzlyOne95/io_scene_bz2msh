@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "BZ2 MSH format",
 	"author": "FruteSoftware@gmail.com",
-	"version": (1, 0, 67),
+	"version": (1, 0, 68),
 	"blender": (4, 1, 0),
 	"location": "File > Import-Export",
 	"description": "Battlezone II MSH Importer",
@@ -44,7 +44,8 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 	directory: StringProperty(subtype="DIR_PATH")
 	filename_ext = ".msh"
 	filter_glob: StringProperty(default="*.msh", options={"HIDDEN"})
-	texture_image_ext_default = ".png .bmp .jpg .jpeg .gif .tga" # ".tif .tiff .jp2 .jc2 .sgi .rgb .bw .cin .dpx .exr .hdr",
+	# Added .dds and .dxtbz2 so they’re considered for texture lookup
+	texture_image_ext_default = ".png .bmp .jpg .jpeg .gif .tga .dds .dxtbz2"
 	
 	files: CollectionProperty(
 		name="File Path",
@@ -109,6 +110,13 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		description="Additional file extensions to check for (May be very slow when combined with Recursive Image Search)",
 		default=texture_image_ext_default
 	)
+
+	# NEW: auto-convert material .dxtbz2 -> .dds
+	auto_convert_dxtbz2: BoolProperty(
+		name="Convert .dxtbz2 to .dds",
+		description="Automatically convert any found .dxtbz2 textures to .dds before loading",
+		default=True
+	)
 	
 	place_at_cursor: BoolProperty(
 		name="Place at Cursor",
@@ -120,6 +128,24 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		name="Rotate Root Frames",
 		description="Rotate root frames so they match blender's world orientation",
 		default=True
+	)
+
+	# NEW: animation import options
+	import_animations: BoolProperty(
+		name="Import Animations",
+		description="Import animations (either as armature or object-based keyframes)",
+		default=False
+	)
+
+	animation_mode: EnumProperty(
+		name="Animation Mode",
+		description="How to import animation data",
+		items=(
+			("AUTO", "Auto", "Use armature for skinned global meshes, objects otherwise"),
+			("ARMATURE", "Armature", "Always try to import as armature-based animation (GLOBAL mode only)"),
+			("OBJECT", "Object", "Animate objects directly without armatures"),
+		),
+		default="AUTO"
 	)
 	
 	def multi_select_files(self):
@@ -143,6 +169,7 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 			sub.prop(self, "import_collection", icon="COLLECTION_NEW")
 		layout.separator()
 		
+		# Mesh options
 		mesh_layout = layout.box()
 		sub = mesh_layout.column()
 		sub.prop(self, "import_mesh_normals", icon="NORMALS_VERTEX")
@@ -157,6 +184,7 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		sub.prop(self, "import_mesh_uvmap", icon="GROUP_UVS")
 		layout.separator()
 		
+		# Texture options
 		texture_layout = layout.box()
 		sub = texture_layout.column()
 		sub.prop(self, "find_textures", icon="TEXTURE_DATA")
@@ -164,6 +192,18 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		sub = texture_layout.column()
 		sub.prop(self, "find_textures_ext")
 		sub.enabled = self.import_mesh_materials
+		sub = texture_layout.column()
+		sub.prop(self, "auto_convert_dxtbz2")
+		sub.enabled = self.import_mesh_materials
+		layout.separator()
+
+		# Animation options
+		anim_layout = layout.box()
+		sub = anim_layout.column()
+		sub.prop(self, "import_animations", icon="ANIM_DATA")
+		sub = anim_layout.column()
+		sub.prop(self, "animation_mode")
+		sub.enabled = self.import_animations
 		layout.separator()
 		
 		layout.prop(self, "place_at_cursor", icon="PIVOT_CURSOR")
