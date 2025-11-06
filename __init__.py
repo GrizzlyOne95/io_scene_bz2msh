@@ -30,11 +30,6 @@ from bpy_extras.io_utils import (
 	axis_conversion
 )
 
-if "bpy" in locals():
-	import importlib
-	if "msh_blender_importer" in locals(): importlib.reload(msh_blender_importer)
-	if "bz2msh" in locals(): importlib.reload(bz2msh)
-
 class ImportMSH(bpy.types.Operator, ImportHelper):
 	"""Import BZ2 MSH file"""
 	bl_idname = "import_scene.io_scene_bz2msh"
@@ -85,13 +80,13 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		description="Import mesh vertex colors",
 		default=True
 	)
-
+	
 	import_mesh_materials: BoolProperty(
 		name="Materials",
 		description="Import mesh face materials",
 		default=True
 	)
-
+	
 	import_mesh_uvmap: BoolProperty(
 		name="UV Maps",
 		description="Import mesh texture coordinates",
@@ -128,11 +123,17 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		default=True
 	)
 	
+	import_animations: BoolProperty(
+		name="Import Animations",
+		description="Import object transform animations from MSH (if present)",
+		default=False
+	)
+	
 	def multi_select_files(self):
 		multi_select = [os.path.join(self.directory, file_elem.name) for file_elem in self.files]
 		multi_select = [path for path in multi_select if os.path.isfile(path)]
 		return multi_select if bool(len(multi_select) >= 2) else []
-
+	
 	def draw(self, context):
 		layout = self.layout
 		multi_select = self.multi_select_files()
@@ -176,6 +177,12 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		sub.prop(self, "auto_convert_dxtbz2", icon="FILE_REFRESH")
 		sub.enabled = self.import_mesh_materials
 
+		layout.separator()
+		
+		anim_layout = layout.box()
+		sub = anim_layout.column()
+		sub.prop(self, "import_animations", icon="ACTION")
+		
 		layout.separator()
 		
 		layout.prop(self, "place_at_cursor", icon="PIVOT_CURSOR")
