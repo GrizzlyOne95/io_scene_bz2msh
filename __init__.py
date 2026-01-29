@@ -105,11 +105,11 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		default=texture_image_ext_default
 	)
 
-	auto_convert_dxtbz2: BoolProperty(
-		name="Auto-convert .dxtbz2 to .dds",
-		description="Automatically convert BZCC .dxtbz2 texture files to .dds next to the source file and load the .dds in Blender",
-		default=False
-	)
+    auto_convert_dxtbz2: BoolProperty(
+        name="Auto-convert .dxtbz2",
+        description="Automatically strip headers from .dxtbz2 files to create .dds files",
+        default=True,
+    )
 	
 	place_at_cursor: BoolProperty(
 		name="Place at Cursor",

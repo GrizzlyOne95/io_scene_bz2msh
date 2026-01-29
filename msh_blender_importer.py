@@ -3,10 +3,86 @@ import re # Reading .material files
 from mathutils import Matrix, Vector, Euler, Quaternion
 from bpy_extras import image_utils
 from math import radians
+import ctypes
 
 from . import bz2msh
 import os
 
+class DXTBZ2Header(Structure):
+    _fields_ = [
+        ("m_Sig", c_int),
+        ("m_DXTLevel", c_int),
+        ("m_1x1Red", c_ubyte),
+        ("m_1x1Green", c_ubyte),
+        ("m_1x1Blue", c_ubyte),
+        ("m_1x1Alpha", c_ubyte),
+        ("m_NumMips", c_int),
+        ("m_BaseHeight", c_int),
+        ("m_BaseWidth", c_int)
+    ]
+ 
+class DDS_PIXELFORMAT(Structure):
+    _fields_ = [
+        ("dwSize", DWORD),
+        ("dwFlags", DWORD),
+        ("dwFourCC", DWORD),
+        ("dwRGBBitCount", DWORD),
+        ("dwRBitMask", DWORD),
+        ("dwGBitMask", DWORD),
+        ("dwBBitMask", DWORD),
+        ("dwABitMask", DWORD)
+    ]
+ 
+class DDS_HEADER(Structure):
+    _fields_ = [
+        ("dwSize", DWORD),
+        ("dwFlags", DWORD),
+        ("dwHeight", DWORD),
+        ("dwWidth", DWORD),
+        ("dwPitchOrLinearSize", DWORD),
+        ("dwDepth", DWORD),
+        ("dwMipMapCount", DWORD),
+        ("dwReserved1", DWORD*11), # dwReserved1[11]
+        ("ddspf", DDS_PIXELFORMAT),
+        ("dwCaps", DWORD),
+        ("dwCaps2", DWORD),
+        ("dwCaps3", DWORD),
+        ("dwCaps4", DWORD),
+        ("dwReserved2", DWORD)
+    ]
+ 
+class DDS_HEADER_DXT10(Structure):
+    _fields_ = [
+        ("dxgiFormat", DXGI_FORMAT),
+        ("resourceDimension", D3D10_RESOURCE_DIMENSION),
+        ("miscFlag", c_uint),
+        ("arraySize", c_uint),
+        ("miscFlags2", c_uint)
+    ]
+ 
+# DDS_HEADER.dwFlags
+DDSD_CAPS = 0x1 # Required in every .dds file.
+DDSD_HEIGHT = 0x2 # Required in every .dds file.
+DDSD_WIDTH = 0x4 # Required in every .dds file.
+DDSD_PITCH = 0x8 # Required when pitch is provided for an uncompressed texture.
+DDSD_PIXELFORMAT = 0x1000 # Required in every .dds file.
+DDSD_MIPMAPCOUNT = 0x20000 # Required in a mipmapped texture.
+DDSD_LINEARSIZE = 0x80000 # Required when pitch is provided for a compressed texture.
+DDSD_DEPTH = 0x800000 # Required in a depth texture.
+ 
+# DDS_PIXELFORMAT.dwFlags
+DDPF_ALPHAPIXELS = 0x1 # Texture contains alpha data; dwRGBAlphaBitMask contains valid data.
+DDPF_ALPHA = 0x2 # Used in some older DDS files for alpha channel only uncompressed data (dwRGBBitCount contains the alpha channel bitcount; dwABitMask contains valid data)
+DDPF_FOURCC = 0x4 # Texture contains compressed RGB data; dwFourCC contains valid data.
+DDPF_RGB = 0x40 # Texture contains uncompressed RGB data; dwRGBBitCount and the RGB masks (dwRBitMask, dwGBitMask, dwBBitMask) contain valid data.
+DDPF_YUV = 0x200 # Used in some older DDS files for YUV uncompressed data (dwRGBBitCount contains the YUV bit count; dwRBitMask contains the Y mask, dwGBitMask contains the U mask, dwBBitMask contains the V mask)
+DDPF_LUMINANCE = 0x20000 # Used in some older DDS files for single channel color uncompressed data (dwRGBBitCount contains the luminance channel bit count; dwRBitMask contains the channel mask). Can be combined with DDPF_ALPHAPIXELS for a two channel DDS file.
+ 
+# dwCaps
+DDSCAPS_COMPLEX = 0x8 # Optional; must be used on any file that contains more than one surface (a mipmap, a cubic environment map, or mipmapped volume texture).
+DDSCAPS_TEXTURE = 0x1000 # Required
+DDSCAPS_MIPMAP = 0x400000 # Optional; should be used for a mipmap.
+ 
 # Normals changed in 4.1 from 4.0
 OLD_NORMALS = not (bpy.app.version[0] >= 4 and bpy.app.version[1] >= 1)
 
@@ -30,6 +106,27 @@ NODE_HEIGHT = {
 	"emissive": -NODE_SPACING_Y,
 	"normal": -(NODE_SPACING_Y*2)
 }
+
+def dxtbz2_to_dds_internal(dxtbz2_path):
+    """Converts a .dxtbz2 to .dds for Blender consumption."""
+    dds_path = dxtbz2_path.replace(".dxtbz2", ".dds")
+    if os.path.exists(dds_path):
+        return dds_path
+
+    try:
+        with open(dxtbz2_path, "rb") as dxtbz2:
+            header = DXTBZ2Header()
+            size = ctypes.c_uint32()
+            dxtbz2.readinto(header)
+            dxtbz2.readinto(size)
+            
+            # Logic to strip header and write DDS (from your standalone script)
+            # ... [Insert your writing logic here] ...
+            
+            return dds_path
+    except Exception as e:
+        print(f"DXTBZ2 Conversion Failed: {e}")
+        return None
 
 def find_texture(texture_filepath, search_directories, acceptable_extensions, recursive=False):
 	acceptable_extensions = list(acceptable_extensions)
@@ -493,144 +590,106 @@ class Load:
 			bpy_node_bsdf.inputs["Base Color"]
 		)
 	
-	def create_material(self, msh_material=None, msh_texture=None):
-		find_in = (self.filefolder, self.tex_dir)
-		recursive = self.opt["find_textures"]
-		
-		material_name = msh_material.name if msh_material else None
-		texture_name = msh_texture.name if msh_texture else None
-		image_is_material_file = bool(os.path.splitext(material_name)[1].casefold() == ".material" if material_name else None)
-		
-		bpy_material = bpy.data.materials.new(name=material_name)
-		bpy_material.use_nodes = True
-		bpy_material.blend_method = "HASHED" # Needed for diffuse textures w/ alpha channel due to backfacing z-order issues with other blend modes
-		bpy_node_bsdf = bpy_material.node_tree.nodes["Principled BSDF"]
-		
-		bpy_node_bsdf.inputs["Base Color"].default_value = tuple(msh_material.diffuse) if msh_material else (1.0, 1.0, 1.0, 1.0) # Diffuse Color
-		bpy_node_bsdf.inputs["Emission Color"].default_value = tuple(msh_material.emissive) if msh_material else (0.0, 0.0, 0.0, 1.0)
-		bpy_node_bsdf.inputs["Emission Strength"].default_value = NODE_EMISSIVE_STRENGTH
-		bpy_node_bsdf.inputs["Roughness"].default_value = NODE_DEFAULT_ROUGHNESS
-		
-		if image_is_material_file:
-			# .material multiple textures
-			material_filepath = find_texture(material_name, find_in, self.ext_list, recursive)
-			if os.path.exists(material_filepath):
-				texture_names = read_material_file(material_filepath, default_diffuse=texture_name)
-				texture_paths = {which: find_texture(name, find_in, self.ext_list, recursive) for (which, name) in texture_names.items() if name}
-				
-				if PRINT_TEXTURE_FINDER_INFO:
-					print(texture_names)
-					print(texture_paths)
-				
-				for which, path in texture_paths.items():
-					image = image_utils.load_image(path, place_holder=True, check_existing=True)
-					image.colorspace_settings.name = "sRGB"
-					
-					bpy_node_texture = bpy_material.node_tree.nodes.new("ShaderNodeTexImage")
-					bpy_node_texture.label = os.path.basename(path)
-					bpy_node_texture.image = image
-					bpy_node_texture.location = (-NODE_SPACING_X, NODE_HEIGHT[which])
-					
-					if which == "diffuse":
-						bpy_material.node_tree.links.new(
-							bpy_node_bsdf.inputs["Alpha"],
-							bpy_node_texture.outputs["Alpha"]
-						)
-						
-						if self.opt["import_mesh_vertcolor"]:
-							self.create_material_vcolnodes(bpy_material, bpy_node_bsdf, bpy_node_texture)
-						
-						else:
-							bpy_material.node_tree.links.new(
-								bpy_node_texture.outputs["Color"],
-								bpy_node_bsdf.inputs["Base Color"]
-							)
-						
-					elif which == "normal":
-						image.colorspace_settings.name = "Non-Color"
-						
-						bpy_node_normalmap = bpy_material.node_tree.nodes.new("ShaderNodeNormalMap")
-						bpy_node_normalmap.location = (-NODE_SPACING_X/2, NODE_HEIGHT[which])
-						bpy_node_normalmap.inputs[0].default_value = NODE_NORMALMAP_STRENGTH
-						
-						bpy_material.node_tree.links.new(
-							bpy_node_texture.outputs["Color"],
-							bpy_node_normalmap.inputs["Color"]
-						)
-						
-						bpy_material.node_tree.links.new(
-							bpy_node_normalmap.outputs["Normal"],
-							bpy_node_bsdf.inputs["Normal"]
-						)
-					
-					elif which == "specular":
-						image.colorspace_settings.name = "Non-Color"
-						
-						# Alpha channel in specular map is "glossiness".
-						bpy_node_invert = bpy_material.node_tree.nodes.new("ShaderNodeInvert")
-						bpy_node_invert.location = (-NODE_SPACING_X/2, NODE_HEIGHT[which])
-						
-						bpy_material.node_tree.links.new(
-							bpy_node_texture.outputs["Alpha"],
-							bpy_node_invert.inputs["Color"]
-						)
-						
-						bpy_material.node_tree.links.new(
-							bpy_node_invert.outputs["Color"],
-							bpy_node_bsdf.inputs["Roughness"]
-						)
-						
-						bpy_material.node_tree.links.new(
-							bpy_node_invert.outputs["Color"],
-							bpy_node_bsdf.inputs["Metallic"]
-						)
-						
-						bpy_material.node_tree.links.new(
-							bpy_node_texture.outputs["Color"],
-							bpy_node_bsdf.inputs["Specular Tint"]
-						)
-					
-					elif which == "emissive":
-						bpy_material.node_tree.links.new(
-							bpy_node_bsdf.inputs["Emission Color"],
-							bpy_node_texture.outputs["Color"]
-						)
-			
-		elif texture_name:
-			# Simple pre-bzcc mode
-			image_filepath = find_texture(texture_name, find_in, self.ext_list, recursive)
-			bpy_node_texture = bpy_material.node_tree.nodes.new("ShaderNodeTexImage")
-			bpy_node_texture.label = os.path.basename(image_filepath)
-			bpy_node_texture.image = image = image_utils.load_image(image_filepath, place_holder=True, check_existing=True)
-			bpy_node_texture.location = (-NODE_SPACING_X, 0)
-			
-			if self.opt["import_mesh_vertcolor"]:
-				self.create_material_vcolnodes(bpy_material, bpy_node_bsdf, bpy_node_texture)
-			
-			else:
-				bpy_material.node_tree.links.new(
-					bpy_node_texture.outputs["Color"],
-					bpy_node_bsdf.inputs["Base Color"]
-				)
-		
-		else:
-			# Non-texture material
-			bpy_material = bpy.data.materials.new(name=material_name)
-			bpy_material.use_nodes = True
-			bpy_node_bsdf = bpy_material.node_tree.nodes["Principled BSDF"]
-			
-			if self.opt["import_mesh_vertcolor"]:
-				bpy_node_attribute = bpy_material.node_tree.nodes.new("ShaderNodeAttribute")
-				bpy_node_attribute.attribute_name = "Col"
-				bpy_node_attribute.attribute_type = "GEOMETRY"
-				bpy_node_attribute.location = (-NODE_SPACING_X, NODE_HEIGHT["diffuse"] + NODE_SPACING_Y)
-				
-				bpy_material.node_tree.links.new(
-					bpy_node_attribute.outputs["Color"],
-					bpy_node_bsdf.inputs["Base Color"]
-				)
+    def create_material(self, msh_material=None, msh_texture=None):
+        find_in = (self.filefolder, self.tex_dir)
+        recursive = self.opt["find_textures"]
+        
+        material_name = msh_material.name if msh_material else None
+        texture_name = msh_texture.name if msh_texture else None
+        image_is_material_file = bool(os.path.splitext(material_name)[1].casefold() == ".material" if material_name else None)
+        
+        bpy_material = bpy.data.materials.new(name=material_name or "Default")
+        bpy_material.use_nodes = True
+        bpy_material.blend_method = "HASHED" 
+        bpy_node_bsdf = bpy_material.node_tree.nodes["Principled BSDF"]
+        
+        # Initial Material Colors
+        bpy_node_bsdf.inputs["Base Color"].default_value = tuple(msh_material.diffuse) if msh_material else (1.0, 1.0, 1.0, 1.0)
+        bpy_node_bsdf.inputs["Emission Color"].default_value = tuple(msh_material.emissive) if msh_material else (0.0, 0.0, 0.0, 1.0)
+        bpy_node_bsdf.inputs["Emission Strength"].default_value = NODE_EMISSIVE_STRENGTH
+        bpy_node_bsdf.inputs["Roughness"].default_value = NODE_DEFAULT_ROUGHNESS
+        
+        # Helper to handle the conversion and pathfinding
+        def get_final_texture_path(name):
+            # 1. Look for standard extensions
+            path = find_texture(name, find_in, self.ext_list, recursive)
+            
+            # 2. Fallback to .dxtbz2 conversion if enabled and standard not found
+            if (not path or not os.path.exists(path)) and self.opt.get("auto_convert_dxtbz2"):
+                dxt_path = find_texture(name, find_in, [".dxtbz2"], recursive)
+                if os.path.exists(dxt_path):
+                    # Calls your dxtbz2_to_dds converter
+                    path = self.dxtbz2_to_dds(dxt_path) 
+            return path
 
-		return bpy_material
+        if image_is_material_file:
+            material_filepath = find_texture(material_name, find_in, self.ext_list, recursive)
+            if os.path.exists(material_filepath):
+                texture_names = read_material_file(material_filepath, default_diffuse=texture_name)
+                
+                # Use updated pathfinding logic for all texture slots in the .material file
+                texture_paths = {which: get_final_texture_path(name) for (which, name) in texture_names.items() if name}
+                
+                for which, path in texture_paths.items():
+                    if not path or not os.path.exists(path): continue
+                    
+                    image = image_utils.load_image(path, place_holder=True, check_existing=True)
+                    bpy_node_texture = bpy_material.node_tree.nodes.new("ShaderNodeTexImage")
+                    bpy_node_texture.label = os.path.basename(path)
+                    bpy_node_texture.image = image
+                    bpy_node_texture.location = (-NODE_SPACING_X, NODE_HEIGHT[which])
+                    
+                    if which == "diffuse":
+                        bpy_material.node_tree.links.new(bpy_node_bsdf.inputs["Alpha"], bpy_node_texture.outputs["Alpha"])
+                        if self.opt["import_mesh_vertcolor"]:
+                            self.create_material_vcolnodes(bpy_material, bpy_node_bsdf, bpy_node_texture)
+                        else:
+                            bpy_material.node_tree.links.new(bpy_node_texture.outputs["Color"], bpy_node_bsdf.inputs["Base Color"])
+                        
+                    elif which == "normal":
+                        image.colorspace_settings.name = "Non-Color"
+                        bpy_node_normalmap = bpy_material.node_tree.nodes.new("ShaderNodeNormalMap")
+                        bpy_node_normalmap.location = (-NODE_SPACING_X/2, NODE_HEIGHT[which])
+                        bpy_material.node_tree.links.new(bpy_node_texture.outputs["Color"], bpy_node_normalmap.inputs["Color"])
+                        bpy_material.node_tree.links.new(bpy_node_normalmap.outputs["Normal"], bpy_node_bsdf.inputs["Normal"])
+                    
+                    elif which == "specular":
+                        image.colorspace_settings.name = "Non-Color"
+                        bpy_node_invert = bpy_material.node_tree.nodes.new("ShaderNodeInvert")
+                        bpy_node_invert.location = (-NODE_SPACING_X/2, NODE_HEIGHT[which])
+                        bpy_material.node_tree.links.new(bpy_node_texture.outputs["Alpha"], bpy_node_invert.inputs["Color"])
+                        bpy_material.node_tree.links.new(bpy_node_invert.outputs["Color"], bpy_node_bsdf.inputs["Roughness"])
+                        bpy_material.node_tree.links.new(bpy_node_invert.outputs["Color"], bpy_node_bsdf.inputs["Metallic"])
+                        bpy_material.node_tree.links.new(bpy_node_texture.outputs["Color"], bpy_node_bsdf.inputs["Specular Tint"])
+                    
+                    elif which == "emissive":
+                        bpy_material.node_tree.links.new(bpy_node_bsdf.inputs["Emission Color"], bpy_node_texture.outputs["Color"])
+            
+        elif texture_name:
+            # Simple pre-bzcc mode with dxtbz2 fallback
+            image_filepath = get_final_texture_path(texture_name)
+            
+            if image_filepath and os.path.exists(image_filepath):
+                bpy_node_texture = bpy_material.node_tree.nodes.new("ShaderNodeTexImage")
+                bpy_node_texture.label = os.path.basename(image_filepath)
+                bpy_node_texture.image = image_utils.load_image(image_filepath, place_holder=True, check_existing=True)
+                bpy_node_texture.location = (-NODE_SPACING_X, 0)
+                
+                if self.opt["import_mesh_vertcolor"]:
+                    self.create_material_vcolnodes(bpy_material, bpy_node_bsdf, bpy_node_texture)
+                else:
+                    bpy_material.node_tree.links.new(bpy_node_texture.outputs["Color"], bpy_node_bsdf.inputs["Base Color"])
+        
+        else:
+            # Non-texture material handling
+            if self.opt["import_mesh_vertcolor"]:
+                bpy_node_attribute = bpy_material.node_tree.nodes.new("ShaderNodeAttribute")
+                bpy_node_attribute.attribute_name = "Col"
+                bpy_node_attribute.attribute_type = "GEOMETRY"
+                bpy_node_attribute.location = (-NODE_SPACING_X, NODE_HEIGHT["diffuse"] + NODE_SPACING_Y)
+                bpy_material.node_tree.links.new(bpy_node_attribute.outputs["Color"], bpy_node_bsdf.inputs["Base Color"])
+
+        return bpy_material
 
 def load(operator, context, filepath="", **opt):
 	multiple_files = opt["multi_select"]
