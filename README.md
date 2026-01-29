@@ -10,6 +10,8 @@ A modern, high-performance Blender Extension for importing `.msh` 3d model asset
 * **Intelligent Mesh Indexing:** Respects vertex group relative indexing to prevent "origin-clumping."
 * **Layered Animations:** Full support for Blender 4.5 **Action Slots**, importing translation and rotation keyframes directly into the Action Editor.
 * **Material Mapping:** Automatically searches for and applies textures/materials based on BZ2 path logic. Multiple materials are supported now!
+* **Auto converts detected DXTBZ2 textures to DDS, and loads into Blender material**
+* **Experimental/Testing: Animation Support:** Adds detected animations to Blender actions
 
 ## Installation (Blender 4.5+)
 
