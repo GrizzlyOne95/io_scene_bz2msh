@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "BZ2 MSH format",
 	"author": "FruteSoftware@gmail.com & GrizzlyOne95",
-	"version": (1, 1, 00),
+	"version": (1, 1, 0),
 	"blender": (4, 5, 0),
 	"location": "File > Import-Export",
 	"description": "Battlezone II/CC MSH Importer",
@@ -57,9 +57,8 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 			("GLOBAL", "Global Mesh", "Import the global mesh"),
 			("LOCAL", "Local Meshes", "Import local meshes (with object hierarchy)")
 		),
-		
 		default="LOCAL",
-		name="import_mode",
+		name="Import Mode",
 		description="Each import mode has a compromise."
 	)
 	
@@ -101,15 +100,15 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 	
 	find_textures_ext: StringProperty(
 		name="Formats",
-		description="Additional file extensions to check for (May be very slow when combined with Recursive Image Search)",
+		description="Additional file extensions to check for",
 		default=texture_image_ext_default
 	)
 
-    auto_convert_dxtbz2: BoolProperty(
-        name="Auto-convert .dxtbz2",
-        description="Automatically strip headers from .dxtbz2 files to create .dds files",
-        default=True,
-    )
+	auto_convert_dxtbz2: BoolProperty(
+		name="Auto-convert .dxtbz2",
+		description="Automatically strip headers from .dxtbz2 files to create .dds files",
+		default=True,
+	)
 	
 	place_at_cursor: BoolProperty(
 		name="Place at Cursor",
@@ -132,7 +131,7 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 	def multi_select_files(self):
 		multi_select = [os.path.join(self.directory, file_elem.name) for file_elem in self.files]
 		multi_select = [path for path in multi_select if os.path.isfile(path)]
-		return multi_select if bool(len(multi_select) >= 2) else []
+		return multi_select if len(multi_select) >= 2 else []
 	
 	def draw(self, context):
 		layout = self.layout
@@ -145,41 +144,33 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		sub = layout.column()
 		if multi_select:
 			layout.label(text="%d files will be imported as collections." % len(multi_select))
-		
 		else:
 			sub.prop(self, "import_collection", icon="COLLECTION_NEW")
+		
 		layout.separator()
 		
 		mesh_layout = layout.box()
+		mesh_layout.label(text="Mesh Data", icon='MESH_DATA')
 		sub = mesh_layout.column()
 		sub.prop(self, "import_mesh_normals", icon="NORMALS_VERTEX")
-		
-		sub = mesh_layout.column()
 		sub.prop(self, "import_mesh_vertcolor", icon="GROUP_VCOL")
-		
-		sub = mesh_layout.column()
 		sub.prop(self, "import_mesh_materials", icon="MATERIAL_DATA")
-		
-		sub = mesh_layout.column()
 		sub.prop(self, "import_mesh_uvmap", icon="GROUP_UVS")
+		
 		layout.separator()
 		
 		texture_layout = layout.box()
+		texture_layout.label(text="Texture Settings", icon='TEXTURE_DATA')
 		sub = texture_layout.column()
+		sub.enabled = self.import_mesh_materials
 		sub.prop(self, "find_textures", icon="TEXTURE_DATA")
-		sub.enabled = self.import_mesh_materials
-
-		sub = texture_layout.column()
 		sub.prop(self, "find_textures_ext")
-		sub.enabled = self.import_mesh_materials
-
-		sub = texture_layout.column()
 		sub.prop(self, "auto_convert_dxtbz2", icon="FILE_REFRESH")
-		sub.enabled = self.import_mesh_materials
 
 		layout.separator()
 		
 		anim_layout = layout.box()
+		anim_layout.label(text="Animations", icon='ACTION')
 		sub = anim_layout.column()
 		sub.prop(self, "import_animations", icon="ACTION")
 		
@@ -197,21 +188,13 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 def menu_func_import(self, context):
 	self.layout.operator(ImportMSH.bl_idname, text="BZ2 MSH (.msh)")
 
-classes = (
-	ImportMSH,
-)
-
 def register():
-	for cls in classes:
-		bpy.utils.register_class(cls)
-
+	bpy.utils.register_class(ImportMSH)
 	bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
 def unregister():
 	bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-
-	for cls in classes:
-		bpy.utils.unregister_class(cls)
+	bpy.utils.unregister_class(ImportMSH)
 
 if __name__ == "__main__":
 	register()
