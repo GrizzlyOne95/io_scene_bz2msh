@@ -1,11 +1,18 @@
 schema_version = "1.0.0"
+
 id = "io_scene_bz2msh"
 version = "1.1.0"
-name = "Battlezone II/CC MSH Importer"
-tagline = "Import/Export BZ2/BZCC MSH files with full animation support and intact global/local mesh."
+name = "Battlezone II MSH Importer"
+tagline = "Modern BZ2 MSH suite with full animation support."
 maintainer = "GrizzlyOne95"
 type = "add-on"
-website = "https://github.com/GrizzlyOne95/io_scene_bz2msh/tree/main"
 
 [blender]
-minimum_version = "4.5.0"
+minimum_version = "4.5.0" # Targets the LTS release
+
+[urls]
+homepage = "https://github.com/GrizzlyOne95/io_scene_bz2msh"
+issues = "https://github.com/GrizzlyOne95/io_scene_bz2msh/issues"
+
+[permissions]
+files = "Access textures and local MSH files"

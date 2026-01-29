@@ -356,39 +356,38 @@ class Load:
         return bpy_mesh
         
     def apply_animations(self, bpy_obj, msh_block):
-        """Parses MSH animation states and applies them as Blender keyframes."""
+        """Imports keyframe data using Blender 4.5 Action Slots."""
         if not hasattr(msh_block, 'animation_list') or not msh_block.animation_list:
             return
 
-        # Ensure object has animation data container
+        # Initialize animation data container if missing
         if not bpy_obj.animation_data:
             bpy_obj.animation_data_create()
-
+        
         for anim in msh_block.animation_list:
-            # Create an Action (Blender's animation container)
+            # 1. Create the Action
             action_name = f"{msh_block.name}_{anim.name}"
             action = bpy.data.actions.new(name=action_name)
-            bpy_obj.animation_data.action = action
             
-            # --- Blender 4.5 Action Slots Logic ---
-            # Create a slot specifically for this object type
+            # 2. Create and assign the Action Slot (Crucial for 4.5+)
+            # This slot connects the F-Curves to the object properties
             slot = action.slots.new(name=bpy_obj.name)
             bpy_obj.animation_data.action = action
-            bpy_obj.animation_data.action_slot = slot
+            bpy_obj.animation_data.action_slot = slot 
             
-            # MSH animations use "states" which are keyframes
+            # 3. Iterate through MSH states (keyframes)
             for state in anim.states:
-                frame = state.frame # Frame index from MSH
+                frame = state.frame_index
                 
-                # Position (Translation)
-                bpy_obj.location = (state.vect.x, state.vect.y, state.vect.z)
+                # Set and Key Location
+                # MSH uses (x, y, z) translation vectors
+                bpy_obj.location = (state.pos_x, state.pos_y, state.pos_z)
                 bpy_obj.keyframe_insert(data_path="location", frame=frame)
                 
-                # Rotation (MSH uses Quaternions for state rotations)
+                # Set and Key Rotation
+                # MSH uses (w, x, y, z) quaternions
                 bpy_obj.rotation_mode = 'QUATERNION'
-                bpy_obj.rotation_quaternion = (
-                    state.quat.s, state.quat.x, state.quat.y, state.quat.z
-                )
+                bpy_obj.rotation_quaternion = (state.rot_w, state.rot_x, state.rot_y, state.rot_z)
                 bpy_obj.keyframe_insert(data_path="rotation_quaternion", frame=frame)
 	
 	# 7-10-2024: Import logic improved by ZerothDivision and tested by GrizzlyOne95
