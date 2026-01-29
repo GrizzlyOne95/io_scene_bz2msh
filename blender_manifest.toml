@@ -6,9 +6,10 @@ name = "Battlezone II MSH Importer"
 tagline = "Modern BZ2 MSH suite with full animation support."
 maintainer = "GrizzlyOne95"
 type = "add-on"
+license = "SPDX:MIT"
 
 [blender]
-minimum_version = "4.5.0" # Targets the LTS release
+minimum_version = "4.5.0"
 
 [urls]
 homepage = "https://github.com/GrizzlyOne95/io_scene_bz2msh"
