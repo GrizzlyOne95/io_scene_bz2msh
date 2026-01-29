@@ -8,8 +8,8 @@ maintainer = "GrizzlyOne95"
 type = "add-on"
 license = ["SPDX:MIT"]
 
-[blender]
-minimum_version = "4.5.0"
+# Corrected field name for Blender 4.5 LTS
+blender_version_min = "4.5.0"
 
 [urls]
 homepage = "https://github.com/GrizzlyOne95/io_scene_bz2msh"
@@ -17,4 +17,3 @@ issues = "https://github.com/GrizzlyOne95/io_scene_bz2msh/issues"
 
 [permissions]
 files = "Access textures and local MSH files"
-
