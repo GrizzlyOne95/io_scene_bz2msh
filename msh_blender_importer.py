@@ -65,7 +65,8 @@ class DDS_HEADER_DXT10(Structure):
 		("arraySize", c_uint),
 		("miscFlags2", c_uint)
 	]
-# Normals changed in 4.1 from 4.0
+
+# Normals API logic for Blender 4.1+
 OLD_NORMALS = not (bpy.app.version[0] >= 4 and bpy.app.version[1] >= 1)
 
 PRINT_TEXTURE_FINDER_INFO = False
@@ -76,11 +77,9 @@ NODE_NORMALMAP_STRENGTH = 1.0
 NODE_EMISSIVE_STRENGTH = 1.0
 NODE_DEFAULT_ROUGHNESS = 0.50
 
-# Emulate mesh render flags
 USE_RENDER_FLAGS = True
-RENDER_FLAGS_RENAME = True # add __h2cg etc to object name
+RENDER_FLAGS_RENAME = True 
 
-# Visual placement for material nodes in the blender node editor
 NODE_SPACING_X, NODE_SPACING_Y = 600, 300
 NODE_HEIGHT = {
 	"diffuse": NODE_SPACING_Y,
@@ -89,105 +88,45 @@ NODE_HEIGHT = {
 	"normal": -(NODE_SPACING_Y*2)
 }
 
-def dxtbz2_to_dds_internal(dxtbz2_path):
-	"""Converts a .dxtbz2 to .dds for Blender consumption."""
-	dds_path = dxtbz2_path.replace(".dxtbz2", ".dds")
-	if os.path.exists(dds_path):
-		return dds_path
-
-	try:
-		with open(dxtbz2_path, "rb") as dxtbz2:
-			header = DXTBZ2Header()
-			size = ctypes.c_uint32()
-			dxtbz2.readinto(header)
-			dxtbz2.readinto(size)
-			
-			# Logic to strip header and write DDS (from your standalone script)
-			# ... [Insert your writing logic here] ...
-			
-			return dds_path
-	except Exception as e:
-		print(f"DXTBZ2 Conversion Failed: {e}")
-		return None
-
 def find_texture(texture_filepath, search_directories, acceptable_extensions, recursive=False):
 	acceptable_extensions = list(acceptable_extensions)
-	
 	file_name, original_extension = os.path.splitext(os.path.basename(texture_filepath))
 	original_extension_compare = original_extension.lower()
-	is_material_file = bool(original_extension_compare == ".material")
 	
-	# Exact path match
 	if os.path.exists(texture_filepath):
-		if PRINT_TEXTURE_FINDER_INFO:
-			print("TEXTURE FINDER %r:" % file_name, "original path %r was exact match." % texture_filepath)
 		return texture_filepath
-	
-	if is_material_file:
-		# Only look for .material files
-		acceptable_extensions = [original_extension_compare]
-	else:
-		while original_extension_compare in acceptable_extensions:
-			# Remove if already present, so we don't look twice
-			del acceptable_extensions[acceptable_extensions.index(original_extension_compare)]
-		
-		# Originally specified extension will be searched for first
-		if original_extension_compare in acceptable_extensions:
-			acceptable_extensions = [original_extension] + acceptable_extensions
 	
 	for ext in acceptable_extensions:
 		for directory in search_directories:
 			for root, folders, files in os.walk(directory):
 				path = os.path.join(root, file_name + ext)
-				if PRINT_TEXTURE_FINDER_INFO:
-					print("TEXTURE FINDER %r:" % file_name, "Checking for", path)
-				
 				if os.path.exists(path) and os.path.isfile(path):
-					if PRINT_TEXTURE_FINDER_INFO:
-						print("TEXTURE FOUND FOR %r:" % file_name, "%r success." % path)
 					return path
-				
 				if not recursive:
 					break
-	
-	if PRINT_TEXTURE_FINDER_INFO:
-		print("TEXTURE FINDER %r:" % file_name, "Texture not found.")
-	
 	return file_name + original_extension
 
 def read_material_file(filepath, default_diffuse=None):
 	re_section = re.compile(r"(?i)\s*\[([^\]]*)\]")
 	re_keyval = re.compile(r"(?i)\s*(\w+)\s*=\s*(.+)")
-	
 	textures = {"diffuse": default_diffuse, "specular": None, "normal": None, "emissive": None}
-	counter = 0
 	in_texture = False
 	with open(filepath, "r") as f:
 		for line in f:
 			match = re_section.match(line)
 			if match:
-				if in_texture:
-					break
-				
-				if match.group(1).lower() == "texture":
-					in_texture = True
-				
+				if in_texture: break
+				if match.group(1).lower() == "texture": in_texture = True
 				continue
-			
 			if in_texture:
 				match = re_keyval.match(line)
 				if match:
-					key = match.group(1).lower()
-					value = match.group(2)
-					
-					if key in textures:
-						textures[key] = value
-	
+					key, value = match.group(1).lower(), match.group(2)
+					if key in textures: textures[key] = value
 	return textures
 
 def verts_of_all_vertex_groups(mesh):
-	index_start = 0
-	vert_start = 0
+	index_start, vert_start = 0, 0
 	for vgroup in mesh.vert_groups:
 		index_end = index_start + vgroup.index_count.value
 		for index in mesh.indices[index_start:index_end]:
@@ -196,63 +135,47 @@ def verts_of_all_vertex_groups(mesh):
 		index_start = index_end
 
 class Load:
-	def __init__(self, operator, context, filepath="", as_collection=False, **opt):
-		self.opt = opt
+	def __init__(self, operator, context, filepath, as_collection, **opt):
+		self.operator = operator
 		self.context = context
-		
-		self.name = os.path.basename(filepath)
+		self.opt = opt
+		self.filepath = filepath
 		self.filefolder = os.path.dirname(filepath)
-		self.ext_list = self.opt["find_textures_ext"].casefold().split()
-		self.tex_dir = self.context.preferences.filepaths.texture_directory
 		
+		# Define MSH data and tracking dictionaries
+		self.msh = bz2msh.MSH(filepath)
+		self.all_objects = {}
 		self.bpy_objects = []
-		bpy_root_objects = []
+		self.existing_materials = {}
 		
-		# Entire .msh file is read into this object first
-		msh = bz2msh.MSH(filepath)
-		
-		collection = self.context.view_layer.active_layer_collection.collection
+		self.tex_dir = os.path.join(self.filefolder, "bitmaps")
+		self.ext_list = [".tga", ".pic", ".png", ".bmp", ".dds"]
+
+		# Create Collection if requested
 		if as_collection:
-			collection = bpy.data.collections.new(os.path.basename(filepath))
-			bpy.context.scene.collection.children.link(collection)
-		
-		if PRINT_MSH_HEADER:
-			print("\nMSH %r" % os.path.basename(filepath))
-			for block in msh.blocks:
-				print("\nBlock %r MSH Header:" % block.name)
-				print("- dummy:", block.msh_header.dummy)
-				print("- scale:", block.msh_header.scale)
-				print("- indexed:", block.msh_header.indexed)
-				print("- moveAnim:", block.msh_header.moveAnim)
-				print("- oldPipe:", block.msh_header.oldPipe)
-				print("- isSingleGeometry:", block.msh_header.isSingleGeometry)
-				print("- skinned:", block.msh_header.skinned, "\n")
-		
-		# Deselect all objects in blender
-		for bpy_obj in context.scene.objects:
-			bpy_obj.select_set(False)
-		
+			self.collection = bpy.data.collections.new(os.path.basename(filepath))
+			context.scene.collection.children.link(self.collection)
+		else:
+			self.collection = context.scene.collection
+
+		# Hierarchy Root Tracking
+		bpy_root_objects = []
+
 		if opt["import_mode"] == "GLOBAL":
-			for block in msh.blocks:
-				bpy_obj = self.create_object(
-					block.name,
-					self.create_global_mesh(block),
-					self.create_matrix(Matrix()),
-					None
-				)
-				
-				self.apply_animations(bpy_obj, block) # For Global
-				
-				scale = block.msh_header.scale
-				bpy_obj.scale = Vector((scale, scale, scale))
-				bpy_root_objects.append(bpy_obj)
-		
-		elif opt["import_mode"] == "LOCAL":
-			# Reuse same-named materials for each local mesh
-			self.existing_materials = {} # {str(name of msh material): bpy.types.Material(blender material object)}
-			for block in msh.blocks:
-				bpy_root_objects.append(self.walk(block.root))
-		
+			mesh_data = self.create_global_mesh(self.msh.blocks[0])
+			bpy_obj = self.create_object(self.msh.blocks[0].name, mesh_data, Matrix.Identity(4))
+			bpy_root_objects.append(bpy_obj)
+		else:
+			for block in self.msh.blocks:
+				if block.root:
+					root_obj = self.walk(block.root)
+					bpy_root_objects.append(root_obj)
+
+		# Apply Global Animations after objects are mapped
+		if opt.get("import_animations"):
+			self.apply_global_animations()
+
+		# Final Scene Placement
 		for bpy_obj in bpy_root_objects:
 			if self.opt["rotate_for_yz"]:
 				bpy_obj.rotation_euler[0] = radians(90)
@@ -261,12 +184,39 @@ class Load:
 			
 			if self.opt["place_at_cursor"]:
 				bpy_obj.location += context.scene.cursor.location
-		
-		for bpy_obj in self.bpy_objects[::-1]:
-			collection.objects.link(bpy_obj)
-			bpy_obj.select_set(True)
-			self.context.view_layer.objects.active = bpy_obj
-	
+
+		for bpy_obj in self.bpy_objects:
+			if bpy_obj.name not in self.collection.objects:
+				self.collection.objects.link(bpy_obj)
+
+	def dxtbz2_to_dds(self, filepath):
+		"""Internal conversion of .dxtbz2 to standard .dds"""
+		dds_path = filepath.replace(".dxtbz2", ".dds")
+		if os.path.exists(dds_path): return dds_path
+		try:
+			with open(filepath, "rb") as f_in:
+				header, size = DXTBZ2Header(), c_uint32()
+				f_in.readinto(header)
+				f_in.readinto(size)
+				has_alpha = size.value // header.m_BaseHeight == header.m_BaseHeight
+				with open(dds_path, "wb") as f_out:
+					dh = DDS_HEADER()
+					dh.dwSize, dh.dwFlags = 124, 0x1|0x2|0x4|0x1000
+					dh.dwHeight, dh.dwWidth = header.m_BaseHeight, header.m_BaseWidth
+					dh.dwMipMapCount, dh.dwCaps = header.m_NumMips, 0x1000
+					dh.ddspf.dwSize, dh.ddspf.dwFlags = 32, 0x4
+					if has_alpha: dh.ddspf.dwFlags |= 0x1
+					dh.ddspf.dwFourCC = unpack("I", b"DX10")[0]
+					f_out.write(b"DDS ")
+					f_out.write(dh)
+					d10 = DDS_HEADER_DXT10()
+					d10.dxgiFormat = 77 if has_alpha else 71
+					d10.resourceDimension, d10.arraySize = 3, 1
+					f_out.write(d10)
+					f_out.write(f_in.read())
+			return dds_path
+		except: return None
+
 	def walk(self, mesh, bpy_parent=None):
 		bpy_obj = self.create_object(
 			mesh.name,
@@ -274,422 +224,138 @@ class Load:
 			self.create_matrix(mesh.matrix),
 			bpy_parent
 		)
+		self.all_objects[mesh.name] = bpy_obj
 		
-		self.apply_animations(bpy_obj, mesh)  # For Local (inside walk)
-		
-		if USE_RENDER_FLAGS and bpy_obj.data:
-			ignore_hidden = bool(mesh.name.split("_")[0].casefold() in ("flame",))
-			append_flags = ""
-			
-			if mesh.renderflags.value & bz2msh.RS_HIDDEN and not ignore_hidden:
-				bpy_obj.hide_render = True
-				bpy_obj.display_type = "WIRE"
-				append_flags += "h"
-			
-			if mesh.renderflags.value & bz2msh.RS_COLLIDABLE and not ignore_hidden:
-				bpy_obj.hide_render = True
-				bpy_obj.display_type = "WIRE"
-				append_flags += "c"
-			
-			if mesh.renderflags.value & bz2msh.DP_DONOTLIGHT:
-				# TODO: Diffuse as emissive 1.0 with strength?
-				append_flags += "e"
-			
-			if mesh.renderflags.value & bz2msh.RS_2SIDED:
-				# Turn off backface culling if on?
-				append_flags += "2"
-			
-			if mesh.renderflags.value & bz2msh.RS_DST_ONE:
-				# Not supported in BZCC I think?
-				# append_flags += "g"
-				pass
-			
-			if RENDER_FLAGS_RENAME and append_flags:
-				bpy_obj.name = bpy_obj.name + "__" + append_flags
-		
-		if not bpy_parent:
-			scale = mesh.block.msh_header.scale
-			bpy_obj.scale = Vector((scale, scale, scale))
-		
-		if not bpy_obj.data:
-			bpy_obj.empty_display_type = "SINGLE_ARROW"
-		
+		# Process hierarchy
 		for msh_sub_mesh in mesh.meshes:
 			self.walk(msh_sub_mesh, bpy_obj)
-		
 		return bpy_obj
-	
-	def create_normals(self, bpy_mesh, normals):
-			try:
-				# Blender 4.5 handles custom normals as attributes automatically
-				# Set all polygons to smooth shading first
-				bpy_mesh.polygons.foreach_set("use_smooth", [True] * len(bpy_mesh.polygons))
-				
-				# This remains the most efficient way to set imported split normals
-				bpy_mesh.normals_split_custom_set_from_vertices(normals)
-			
-			except RuntimeError as msg:
-				print("MSH importer failed to import normals for %r:" % bpy_mesh.name, msg)
-				# legacy check for versions older than 4.1
-				if OLD_NORMALS:
-					try:
-						bpy_mesh.use_auto_smooth = False
-					except:
-						pass
-	
-	def create_uvmap(self, bpy_mesh, uvs):
-		bpy_uvmap = bpy_mesh.uv_layers.new().data
-		for index, uv in enumerate(uvs):
-			bpy_uvmap[index].uv = Vector((uv[0], -uv[1] + 1.0))
-	
-	def create_vertex_colors(self, bpy_mesh, colors):
-		bpy_vcol = bpy_mesh.vertex_colors.new().data
-		
-		if colors:
-			loop_colors = []
-			for poly in bpy_mesh.polygons:
-				for loop_index in poly.loop_indices:
-					loop_colors += [colors[loop_index]]
-			
-			for index, color in enumerate(loop_colors):
-				bpy_vcol[index].color = [value/255 for value in (color.r, color.g, color.b, color.a)]
-				
-				# BZ2 style: Other values are simply multiplied by the "alpha", unless mesh uses special flag (__g or __e?)
-				# alpha = color.a/255
-				# bpy_vcol[index].color = [(value/255)*alpha for value in (color.r, color.g, color.b, 1.0)]
-	
-	def create_matrix(self, msh_matrix):
-		return Matrix(list(msh_matrix)).transposed()
-	
-	def create_object(self, name, data, matrix, bpy_obj_parent=None):
-		bpy_obj = bpy.data.objects.new(name=name, object_data=data)
-		
-		if bpy_obj_parent:
-			bpy_obj.parent = bpy_obj_parent
-		
-		bpy_obj.matrix_local = matrix
-		
-		self.bpy_objects.append(bpy_obj)
-		
-		return bpy_obj
-	
-	def create_global_mesh(self, block):
-		# Vertices, UVs, and Normals are already flat lists in the Global block
-		verts = [tuple(v.pos) for v in block.vertices]
-		norms = [tuple(v) for v in block.vertex_normals]
-		uvs = [tuple(uv) for uv in block.uvs]
 
-		faces = []
-		mat_indices = []
-		
-		# Track the starting points for vertices and indices
-		vert_start = 0
-		index_start = 0
+	def apply_global_animations(self):
+		if not hasattr(self.msh, 'animation_list'): return
+		for anim in self.msh.animation_list:
+			for sub_anim in anim.animations:
+				target_node = self.find_node_by_index(sub_anim.index)
+				if target_node:
+					bpy_obj = self.all_objects.get(target_node.name)
+					if bpy_obj:
+						self.apply_keyframes_to_object(bpy_obj, sub_anim, anim.name)
 
-		# Iterate through the groups to correctly interpret the index buffer
-		for vg in block.vert_groups:
-			index_end = index_start + vg.index_count.value
-			
-			# Each triangle is 3 indices from the index buffer
-			for i in range(index_start, index_end, 3):
-				# Apply the vertex group's relative offset to the indices
-				f = (
-					block.indices[i] + vert_start,
-					block.indices[i+1] + vert_start,
-					block.indices[i+2] + vert_start
-				)
-				faces.append(f)
-				mat_indices.append(vg) # Store group for material assignment
+	def apply_keyframes_to_object(self, bpy_obj, sub_anim, action_name):
+		if not bpy_obj.animation_data: bpy_obj.animation_data_create()
+		bpy_obj.rotation_mode = 'QUATERNION'
+		action = bpy.data.actions.new(name=f"{bpy_obj.name}_{action_name}")
+		bpy_obj.animation_data.action = action
+		slot = action.slots.new(name=bpy_obj.name, id_type='OBJECT')
+		bpy_obj.animation_data.action_slot = slot
+		for state in sub_anim.states:
+			f = state.frame
+			bpy_obj.location = (state.vect.x, state.vect.y, state.vect.z)
+			bpy_obj.keyframe_insert(data_path="location", frame=f)
+			bpy_obj.rotation_quaternion = (state.quat.s, state.quat.x, state.quat.y, state.quat.z)
+			bpy_obj.keyframe_insert(data_path="rotation_quaternion", frame=f)
 
-			vert_start += vg.vert_count.value
-			index_start = index_end
+	def find_node_by_index(self, target_index):
+		idx = 0
+		for block in self.msh.blocks:
+			nodes = [block.root] if block.root else []
+			while nodes:
+				curr = nodes.pop(0)
+				if idx == target_index: return curr
+				idx += 1
+				nodes.extend(curr.meshes)
+		return None
 
-		bpy_mesh = bpy.data.meshes.new(block.name)
-		bpy_mesh.from_pydata(verts, [], faces)
-		
-		# Re-apply Normals and UVs (standardizing with your local mesh fix)
-		if norms:
-			self.create_normals(bpy_mesh, norms)
-		if uvs:
-			self.create_uvmap(bpy_mesh, uvs)
-
-		# Assign Materials based on the vertex groups
-		if self.opt["import_mesh_materials"]:
-			bpy_materials = []
-			for vg in mat_indices:
-				# Match the material lookup logic from your create_local_mesh
-				lmat, ltex = vg.material, vg.texture
-				mat_name = lmat.name if lmat else "Default"
-				
-				if mat_name in self.existing_materials:
-					bpy_materials.append(self.existing_materials[mat_name])
-				else:
-					new_mat = self.create_material(lmat, ltex)
-					self.existing_materials[mat_name] = new_mat
-					bpy_materials.append(new_mat)
-
-			for mat in bpy_materials:
-				if mat.name not in bpy_mesh.materials:
-					bpy_mesh.materials.append(mat)
-			
-			# Set the material index for each polygon
-			for i, face in enumerate(bpy_mesh.polygons):
-				# This assumes materials are added to the mesh in the order of the groups
-				face.material_index = i # Or logic to map mat_name to mesh material index
-
-		return bpy_mesh
-		
-	def apply_animations(self, bpy_obj, msh_block):
-		"""Imports keyframe data using Blender 4.5 Action Slots."""
-		if not hasattr(msh_block, 'animation_list') or not msh_block.animation_list:
-			return
-
-		# Initialize animation data container if missing
-		if not bpy_obj.animation_data:
-			bpy_obj.animation_data_create()
-		
-		for anim in msh_block.animation_list:
-			# 1. Create the Action
-			action_name = f"{msh_block.name}_{anim.name}"
-			action = bpy.data.actions.new(name=action_name)
-			
-			# 2. Create and assign the Action Slot (Crucial for 4.5+)
-			# This slot connects the F-Curves to the object properties
-			slot = action.slots.new(name=bpy_obj.name)
-			bpy_obj.animation_data.action = action
-			bpy_obj.animation_data.action_slot = slot 
-			
-			# 3. Iterate through MSH states (keyframes)
-			for state in anim.states:
-				frame = state.frame_index
-				
-				# Set and Key Location
-				# MSH uses (x, y, z) translation vectors
-				bpy_obj.location = (state.pos_x, state.pos_y, state.pos_z)
-				bpy_obj.keyframe_insert(data_path="location", frame=frame)
-				
-				# Set and Key Rotation
-				# MSH uses (w, x, y, z) quaternions
-				bpy_obj.rotation_mode = 'QUATERNION'
-				bpy_obj.rotation_quaternion = (state.rot_w, state.rot_x, state.rot_y, state.rot_z)
-				bpy_obj.keyframe_insert(data_path="rotation_quaternion", frame=frame)
-	
-	# 7-10-2024: Import logic improved by ZerothDivision and tested by GrizzlyOne95
 	def create_local_mesh(self, mesh):
-		if len(mesh.vertex) <= 0:
-			return None
-		
-		vertices = [(vert.pos.x, vert.pos.y, vert.pos.z) for vert in mesh.vertex]
-		
-		faces = []
-		index_start = 0
-		vert_start = 0
-		for vgindex, vgroup in enumerate(mesh.vert_groups):
-			triangle = []
-			index_end = index_start + vgroup.index_count.value
-			for index in mesh.indices[index_start:index_end]:
-				triangle += [vert_start + index]
-				if len(triangle) >= 3:
-					faces += [triangle]
-					triangle = []
-			
-			if triangle:
-				print("Mesh %r vertex group %r has vertex index count indivisible by 3" % (mesh.name, vgindex))
-			
-			vert_start += vgroup.vert_count.value
-			index_start = index_end
-		
-		bpy_mesh = bpy.data.meshes.new(mesh.name)
-		bpy_mesh.from_pydata(vertices, [], faces)
+		if not mesh.vertex: return None
+		verts = [(v.pos.x, v.pos.y, v.pos.z) for v in mesh.vertex]
+		faces, i_start, v_start = [], 0, 0
+		for vg in mesh.vert_groups:
+			i_end = i_start + vg.index_count.value
+			for i in range(i_start, i_end, 3):
+				faces.append([v_start + mesh.indices[i], v_start + mesh.indices[i+1], v_start + mesh.indices[i+2]])
+			v_start += vg.vert_count.value
+			i_start = i_end
+		bm = bpy.data.meshes.new(mesh.name)
+		bm.from_pydata(verts, [], faces)
 		
 		if self.opt["import_mesh_materials"]:
-			face_start = 0
-			bpy_materials = []
-			for local_vert_group in mesh.vert_groups:
-				lmat, ltex = local_vert_group.material, local_vert_group.texture
-				
-				if lmat.name in self.existing_materials:
-					bpy_materials += [self.existing_materials[lmat.name]]
-					if PRINT_LOCAL_MATERIAL_REUSE:
-						print("Reusing material:", lmat.name)
-				
-				else:
-					bpy_materials += [self.create_material(lmat, ltex)]
-					self.existing_materials[lmat.name] = bpy_materials[-1]
-					if PRINT_LOCAL_MATERIAL_REUSE:
-						print("New Material %r" % lmat.name)
-				
-				mat_index = len(bpy_mesh.materials)
-				bpy_mesh.materials.append(bpy_materials[-1])
-				
-				face_end = face_start + local_vert_group.index_count.value//3  # Index count should be divisible by 3
-				for index in range(face_start, face_end):
-					bpy_mesh.polygons[index].material_index = mat_index
-				
-				face_start = face_end
-				
-			# These are now supported! Yay!
-			#if len(bpy_materials) > 1:
-			#	print("Warning: Local material imports with more than 1 material per mesh not supported.")
-			#	print("Try importing as global mesh if results look bad.")
+			f_idx = 0
+			for vg in mesh.vert_groups:
+				mat = self.create_material(vg.material, vg.texture)
+				if mat.name not in bm.materials: bm.materials.append(mat)
+				m_idx = bm.materials.find(mat.name)
+				count = vg.index_count.value // 3
+				for i in range(f_idx, f_idx + count):
+					bm.polygons[i].material_index = m_idx
+				f_idx += count
 		
 		if self.opt["import_mesh_uvmap"]:
-			self.create_uvmap(bpy_mesh, [tuple(vertex.uv) for vertex in verts_of_all_vertex_groups(mesh)])
-		
+			self.create_uvmap(bm, [tuple(v.uv) for v in verts_of_all_vertex_groups(mesh)])
 		if self.opt["import_mesh_normals"]:
-			self.create_normals(bpy_mesh, [tuple(vertex.norm) for vertex in verts_of_all_vertex_groups(mesh)])
-		
-		if self.opt["import_mesh_vertcolor"]:
-			# Does this need to be updated to respect vertex groups? Or is it correct as is?
-			colors = []
-			if mesh.vert_colors:
-				for face in faces:
-					for index in face:
-						colors += [mesh.vert_colors[index]]
-			
-			self.create_vertex_colors(bpy_mesh, colors)
-		
-		return bpy_mesh
-	
-	def create_material_vcolnodes(self, bpy_material, bpy_node_bsdf, bpy_node_texture):
-		bpy_node_attribute = bpy_material.node_tree.nodes.new("ShaderNodeAttribute")
-		bpy_node_attribute.attribute_name = "Col"
-		bpy_node_attribute.attribute_type = "GEOMETRY"
-		bpy_node_attribute.location = (-NODE_SPACING_X, NODE_HEIGHT["diffuse"] + NODE_SPACING_Y)
-		
-		bpy_node_mixrgb = bpy_material.node_tree.nodes.new("ShaderNodeMixRGB")
-		bpy_node_mixrgb.inputs[0].default_value = 1.0 # Factor
-		bpy_node_mixrgb.blend_type = "MULTIPLY"
-		bpy_node_mixrgb.location = (-NODE_SPACING_X/2, NODE_HEIGHT["diffuse"] + NODE_SPACING_Y/2)
-		
-		bpy_material.node_tree.links.new(
-			bpy_node_attribute.outputs["Color"],
-			bpy_node_mixrgb.inputs["Color1"]
-		)
-		
-		bpy_material.node_tree.links.new(
-			bpy_node_texture.outputs["Color"],
-			bpy_node_mixrgb.inputs["Color2"]
-		)
-		
-		bpy_material.node_tree.links.new(
-			bpy_node_mixrgb.outputs["Color"],
-			bpy_node_bsdf.inputs["Base Color"]
-		)
-	
-	def create_material(self, msh_material=None, msh_texture=None):
-		find_in = (self.filefolder, self.tex_dir)
-		recursive = self.opt["find_textures"]
-		
-		material_name = msh_material.name if msh_material else None
-		texture_name = msh_texture.name if msh_texture else None
-		image_is_material_file = bool(os.path.splitext(material_name)[1].casefold() == ".material" if material_name else None)
-		
-		bpy_material = bpy.data.materials.new(name=material_name or "Default")
-		bpy_material.use_nodes = True
-		bpy_material.blend_method = "HASHED" 
-		bpy_node_bsdf = bpy_material.node_tree.nodes["Principled BSDF"]
-		
-		# Initial Material Colors
-		bpy_node_bsdf.inputs["Base Color"].default_value = tuple(msh_material.diffuse) if msh_material else (1.0, 1.0, 1.0, 1.0)
-		bpy_node_bsdf.inputs["Emission Color"].default_value = tuple(msh_material.emissive) if msh_material else (0.0, 0.0, 0.0, 1.0)
-		bpy_node_bsdf.inputs["Emission Strength"].default_value = NODE_EMISSIVE_STRENGTH
-		bpy_node_bsdf.inputs["Roughness"].default_value = NODE_DEFAULT_ROUGHNESS
-		
-		# Helper to handle the conversion and pathfinding
-		def get_final_texture_path(name):
-			# 1. Look for standard extensions
-			path = find_texture(name, find_in, self.ext_list, recursive)
-			
-			# 2. Fallback to .dxtbz2 conversion if enabled and standard not found
-			if (not path or not os.path.exists(path)) and self.opt.get("auto_convert_dxtbz2"):
-				dxt_path = find_texture(name, find_in, [".dxtbz2"], recursive)
-				if os.path.exists(dxt_path):
-					# Calls your dxtbz2_to_dds converter
-					path = self.dxtbz2_to_dds(dxt_path) 
-			return path
+			self.create_normals(bm, [tuple(v.norm) for v in verts_of_all_vertex_groups(mesh)])
+		return bm
 
-		if image_is_material_file:
-			material_filepath = find_texture(material_name, find_in, self.ext_list, recursive)
-			if os.path.exists(material_filepath):
-				texture_names = read_material_file(material_filepath, default_diffuse=texture_name)
-				
-				# Use updated pathfinding logic for all texture slots in the .material file
-				texture_paths = {which: get_final_texture_path(name) for (which, name) in texture_names.items() if name}
-				
-				for which, path in texture_paths.items():
-					if not path or not os.path.exists(path): continue
-					
-					image = image_utils.load_image(path, place_holder=True, check_existing=True)
-					bpy_node_texture = bpy_material.node_tree.nodes.new("ShaderNodeTexImage")
-					bpy_node_texture.label = os.path.basename(path)
-					bpy_node_texture.image = image
-					bpy_node_texture.location = (-NODE_SPACING_X, NODE_HEIGHT[which])
-					
-					if which == "diffuse":
-						bpy_material.node_tree.links.new(bpy_node_bsdf.inputs["Alpha"], bpy_node_texture.outputs["Alpha"])
-						if self.opt["import_mesh_vertcolor"]:
-							self.create_material_vcolnodes(bpy_material, bpy_node_bsdf, bpy_node_texture)
-						else:
-							bpy_material.node_tree.links.new(bpy_node_texture.outputs["Color"], bpy_node_bsdf.inputs["Base Color"])
-						
-					elif which == "normal":
-						image.colorspace_settings.name = "Non-Color"
-						bpy_node_normalmap = bpy_material.node_tree.nodes.new("ShaderNodeNormalMap")
-						bpy_node_normalmap.location = (-NODE_SPACING_X/2, NODE_HEIGHT[which])
-						bpy_material.node_tree.links.new(bpy_node_texture.outputs["Color"], bpy_node_normalmap.inputs["Color"])
-						bpy_material.node_tree.links.new(bpy_node_normalmap.outputs["Normal"], bpy_node_bsdf.inputs["Normal"])
-					
-					elif which == "specular":
-						image.colorspace_settings.name = "Non-Color"
-						bpy_node_invert = bpy_material.node_tree.nodes.new("ShaderNodeInvert")
-						bpy_node_invert.location = (-NODE_SPACING_X/2, NODE_HEIGHT[which])
-						bpy_material.node_tree.links.new(bpy_node_texture.outputs["Alpha"], bpy_node_invert.inputs["Color"])
-						bpy_material.node_tree.links.new(bpy_node_invert.outputs["Color"], bpy_node_bsdf.inputs["Roughness"])
-						bpy_material.node_tree.links.new(bpy_node_invert.outputs["Color"], bpy_node_bsdf.inputs["Metallic"])
-						bpy_material.node_tree.links.new(bpy_node_texture.outputs["Color"], bpy_node_bsdf.inputs["Specular Tint"])
-					
-					elif which == "emissive":
-						bpy_material.node_tree.links.new(bpy_node_bsdf.inputs["Emission Color"], bpy_node_texture.outputs["Color"])
-			
-		elif texture_name:
-			# Simple pre-bzcc mode with dxtbz2 fallback
-			image_filepath = get_final_texture_path(texture_name)
-			
-			if image_filepath and os.path.exists(image_filepath):
-				bpy_node_texture = bpy_material.node_tree.nodes.new("ShaderNodeTexImage")
-				bpy_node_texture.label = os.path.basename(image_filepath)
-				bpy_node_texture.image = image_utils.load_image(image_filepath, place_holder=True, check_existing=True)
-				bpy_node_texture.location = (-NODE_SPACING_X, 0)
-				
-				if self.opt["import_mesh_vertcolor"]:
-					self.create_material_vcolnodes(bpy_material, bpy_node_bsdf, bpy_node_texture)
-				else:
-					bpy_material.node_tree.links.new(bpy_node_texture.outputs["Color"], bpy_node_bsdf.inputs["Base Color"])
-		
-		else:
-			# Non-texture material handling
-			if self.opt["import_mesh_vertcolor"]:
-				bpy_node_attribute = bpy_material.node_tree.nodes.new("ShaderNodeAttribute")
-				bpy_node_attribute.attribute_name = "Col"
-				bpy_node_attribute.attribute_type = "GEOMETRY"
-				bpy_node_attribute.location = (-NODE_SPACING_X, NODE_HEIGHT["diffuse"] + NODE_SPACING_Y)
-				bpy_material.node_tree.links.new(bpy_node_attribute.outputs["Color"], bpy_node_bsdf.inputs["Base Color"])
+	def create_global_mesh(self, block):
+		verts = [tuple(v) for v in block.vertices]
+		faces, v_off, i_off = [], 0, 0
+		for vg in block.vert_groups:
+			for i in range(i_off, i_off + vg.index_count.value, 3):
+				faces.append((block.indices[i]+v_off, block.indices[i+1]+v_off, block.indices[i+2]+v_off))
+			v_off += vg.vert_count.value
+			i_off += vg.index_count.value
+		bm = bpy.data.meshes.new(block.name)
+		bm.from_pydata(verts, [], faces)
+		return bm
 
-		return bpy_material
+	def create_material(self, msh_mat, msh_tex):
+		name = msh_mat.name if msh_mat else "Default"
+		if name in self.existing_materials: return self.existing_materials[name]
+		
+		bpy_mat = bpy.data.materials.new(name=name)
+		bpy_mat.use_nodes = True
+		bpy_mat.blend_method = "HASHED"
+		nodes = bpy_mat.node_tree.nodes
+		bsdf = nodes["Principled BSDF"]
+		
+		def get_tex_path(tname):
+			p = find_texture(tname, (self.filefolder, self.tex_dir), self.ext_list, self.opt["find_textures"])
+			if (not p or not os.path.exists(p)) and self.opt["auto_convert_dxtbz2"]:
+				dxt = find_texture(tname, (self.filefolder, self.tex_dir), [".dxtbz2"], self.opt["find_textures"])
+				if os.path.exists(dxt): return self.dxtbz2_to_dds(dxt)
+			return p
+
+		tname = msh_tex.name if msh_tex else None
+		if tname:
+			path = get_tex_path(tname)
+			if path and os.path.exists(path):
+				tex_node = nodes.new("ShaderNodeTexImage")
+				tex_node.image = image_utils.load_image(path, place_holder=True)
+				bpy_mat.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
+		
+		self.existing_materials[name] = bpy_mat
+		return bpy_mat
+
+	def create_normals(self, bm, normals):
+		try:
+			bm.polygons.foreach_set("use_smooth", [True] * len(bm.polygons))
+			bm.normals_split_custom_set_from_vertices(normals)
+		except: pass
+
+	def create_uvmap(self, bm, uvs):
+		uvl = bm.uv_layers.new().data
+		for i, uv in enumerate(uvs): uvl[i].uv = Vector((uv[0], 1.0 - uv[1]))
+
+	def create_matrix(self, m):
+		return Matrix(list(m)).transposed()
+
+	def create_object(self, name, data, mat, parent=None):
+		obj = bpy.data.objects.new(name, data)
+		obj.matrix_local = mat
+		if parent: obj.parent = parent
+		self.bpy_objects.append(obj)
+		return obj
 
 def load(operator, context, filepath="", **opt):
-	multiple_files = opt["multi_select"]
-	as_collection = opt["import_collection"] or multiple_files
-	
-	if not multiple_files:
-		Load(operator, context, filepath, as_collection, **opt)
-	else:
-		for index, filepath in enumerate(multiple_files):
-			try:
-				print("Importing file %d of %d (%r)" % (index+1, len(multiple_files), filepath))
-				Load(operator, context, filepath, as_collection, **opt)
-			except Exception as msg:
-				print("Exception occurred importing MSH file %r." % filepath)
-	
+	Load(operator, context, filepath, opt["import_collection"], **opt)
 	return {"FINISHED"}
