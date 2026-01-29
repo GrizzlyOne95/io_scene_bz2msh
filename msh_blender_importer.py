@@ -240,13 +240,13 @@ class Load:
 		
 		return bpy_obj
 	
-	def create_normals(self, bpy_mesh, normals):
-		try:
-			# Note: Setting invalid normals causes a crash when going into edit mode.
-			# If possible, at this point we should check for invalid normals that might cause blender to crash.
-			bpy_mesh.normals_split_custom_set(normals)
-			if OLD_NORMALS:
-				bpy_mesh.use_auto_smooth = True
+    def create_normals(self, bpy_mesh, normals):
+            # Blender 4.5 handles custom normals as attributes automatically
+            # No need to toggle 'use_auto_smooth'
+            bpy_mesh.polygons.foreach_set("use_smooth", [True] * len(bpy_mesh.polygons))
+            
+            # This remains the most efficient way to set imported split normals
+            bpy_mesh.normals_split_custom_set_from_vertices(normals)
 		
 		except RuntimeError as msg:
 			print("MSH importer failed to import normals for %r:" % bpy_mesh.name, msg)
@@ -369,6 +369,12 @@ class Load:
             action_name = f"{msh_block.name}_{anim.name}"
             action = bpy.data.actions.new(name=action_name)
             bpy_obj.animation_data.action = action
+            
+            # --- Blender 4.5 Action Slots Logic ---
+            # Create a slot specifically for this object type
+            slot = action.slots.new(name=bpy_obj.name)
+            bpy_obj.animation_data.action = action
+            bpy_obj.animation_data.action_slot = slot
             
             # MSH animations use "states" which are keyframes
             for state in anim.states:
