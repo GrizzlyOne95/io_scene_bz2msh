@@ -2,7 +2,7 @@ Forked from https://github.com/frute94/io_scene_bz2msh/tree/main
 
 # Battlezone II/Combat Commander MSH Importer for Blender 4.5 LTS
 
-A modern, high-performance Blender Extension for importing `.msh` assets from **Battlezone 98 Redux** and **Battlezone II**. This tool is designed specifically for the Blender 4.5+ ecosystem, supporting the new layered animation system and Vulkan-based viewport.
+A modern, high-performance Blender Extension for importing `.msh` 3d model assets from **Battlezone Combat Commander** and **Battlezone II**. This tool is designed specifically for the Blender 4.5+ ecosystem, supporting the new layered animation system and Vulkan-based viewport.
 
 ## Features
 
