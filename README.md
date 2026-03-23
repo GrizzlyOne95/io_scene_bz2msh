@@ -8,10 +8,10 @@ A modern, high-performance Blender Extension for importing `.msh` 3d model asset
 
 * **Global & Local Support:** Correctly handles both global geometry (origin-offset) and local hierarchy meshes.
 * **Intelligent Mesh Indexing:** Respects vertex group relative indexing to prevent "origin-clumping."
-* **Layered Animations:** Full support for Blender 4.5 **Action Slots**, importing translation and rotation keyframes directly into the Action Editor.
+* **Layered Animations:** Imports block-level object animations into Blender 4.5 **Action Slots**, mapping clips by MSH `state_index` so moving parts land on the correct objects.
+* **Blender-Space Transform Baking:** Local transforms and animation keyframes are converted into Blender-space channels when `Rotate Root Frames` is enabled, so Action Editor values match the viewport orientation.
 * **Material Mapping:** Automatically searches for and applies textures/materials based on BZ2 path logic. Multiple materials are supported now!
-* **Auto converts detected DXTBZ2 textures to DDS, and loads into Blender material**
-* **Experimental/Testing: Animation Support:** Adds detected animations to Blender actions
+* **DXTBZ2 Conversion:** Auto-converts detected `.dxtbz2` textures to `.dds` and loads them into Blender materials.
 
 ## Installation (Blender 4.5+)
 
@@ -30,8 +30,18 @@ The easiest way to install this is using the new **Extensions** system:
 2.  Select your file. 
 3.  **Import Options:**
     * **Import Animations:** Creates Actions and Slots for any embedded keyframes.
-    * **Find Textures:** Searches adjacent folders (like `/bitmaps/`) for matching `.tga` or `.pic` files.
-    * **Respect Relative Indexing:** (Enabled by default) Ensures geometry segments are placed correctly.
+    * **Global Mesh:** Imports the block as a single mesh object. Useful for quick static inspection, but it does not preserve animated sub-objects as separate Blender objects.
+    * **Local Meshes:** Imports the full node hierarchy as separate objects. Use this mode for hardpoints, moving parts, and object-transform animations such as deploy/retract clips.
+    * **Rotate Root Frames:** Converts BZ2 transforms into Blender-space. Leave this enabled unless you explicitly want raw source axes.
+    * **Find Textures:** Searches adjacent folders (like `/bitmaps/`) for matching textures.
+    * **Auto-convert .dxtbz2:** Converts supported `.dxtbz2` textures to `.dds` on demand before loading them into Blender.
+
+## Notes
+
+* BZ2 animation in `.msh` files is object-transform based, not armature/skinning based. Animated parts import as separate Blender objects with Actions.
+* Animation clips are read from each parsed block's `animation_list`, not from a top-level file animation table.
+* The importer resolves animation targets by `state_index`, which is required for multi-part assets such as deployable structures and vehicles.
+* `Global Mesh` is best for static review. `Local Meshes` is the correct mode for animated assets.
 
 ## Repository Structure
 

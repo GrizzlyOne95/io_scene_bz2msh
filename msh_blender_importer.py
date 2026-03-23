@@ -88,6 +88,14 @@ NODE_HEIGHT = {
 	"normal": -(NODE_SPACING_Y*2)
 }
 
+BZ2_TO_BLENDER = Matrix((
+	(1.0, 0.0, 0.0, 0.0),
+	(0.0, 0.0, 1.0, 0.0),
+	(0.0, 1.0, 0.0, 0.0),
+	(0.0, 0.0, 0.0, 1.0),
+))
+BZ2_TO_BLENDER_3 = BZ2_TO_BLENDER.to_3x3()
+
 def find_texture(texture_filepath, search_directories, acceptable_extensions, recursive=False):
 	acceptable_extensions = list(acceptable_extensions)
 	file_name, original_extension = os.path.splitext(os.path.basename(texture_filepath))
@@ -145,6 +153,7 @@ class Load:
 		# Define MSH data and tracking dictionaries
 		self.msh = bz2msh.MSH(filepath)
 		self.all_objects = {}
+		self.objects_by_state_index = {}
 		self.bpy_objects = []
 		self.existing_materials = {}
 		
@@ -177,11 +186,6 @@ class Load:
 
 		# Final Scene Placement
 		for bpy_obj in bpy_root_objects:
-			if self.opt["rotate_for_yz"]:
-				bpy_obj.rotation_euler[0] = radians(90)
-				bpy_obj.rotation_euler[2] = radians(180)
-				bpy_obj.location[1], bpy_obj.location[2] = bpy_obj.location[2], bpy_obj.location[1]
-			
 			if self.opt["place_at_cursor"]:
 				bpy_obj.location += context.scene.cursor.location
 
@@ -191,13 +195,15 @@ class Load:
 
 	def dxtbz2_to_dds(self, filepath):
 		"""Internal conversion of .dxtbz2 to standard .dds"""
-		dds_path = filepath.replace(".dxtbz2", ".dds")
+		dds_path = os.path.splitext(filepath)[0] + ".dds"
 		if os.path.exists(dds_path): return dds_path
 		try:
 			with open(filepath, "rb") as f_in:
 				header, size = DXTBZ2Header(), c_uint32()
 				f_in.readinto(header)
 				f_in.readinto(size)
+				if header.m_BaseHeight <= 0 or header.m_BaseWidth <= 0:
+					return None
 				has_alpha = size.value // header.m_BaseHeight == header.m_BaseHeight
 				with open(dds_path, "wb") as f_out:
 					dh = DDS_HEADER()
@@ -225,6 +231,7 @@ class Load:
 			bpy_parent
 		)
 		self.all_objects[mesh.name] = bpy_obj
+		self.objects_by_state_index[mesh.state_index.value] = bpy_obj
 		
 		# Process hierarchy
 		for msh_sub_mesh in mesh.meshes:
@@ -232,12 +239,10 @@ class Load:
 		return bpy_obj
 
 	def apply_global_animations(self):
-		if not hasattr(self.msh, 'animation_list'): return
-		for anim in self.msh.animation_list:
-			for sub_anim in anim.animations:
-				target_node = self.find_node_by_index(sub_anim.index)
-				if target_node:
-					bpy_obj = self.all_objects.get(target_node.name)
+		for block in self.msh.blocks:
+			for anim in getattr(block, "animation_list", []):
+				for sub_anim in anim.animations:
+					bpy_obj = self.find_node_by_index(sub_anim.index)
 					if bpy_obj:
 						self.apply_keyframes_to_object(bpy_obj, sub_anim, anim.name)
 
@@ -250,21 +255,13 @@ class Load:
 		bpy_obj.animation_data.action_slot = slot
 		for state in sub_anim.states:
 			f = state.frame
-			bpy_obj.location = (state.vect.x, state.vect.y, state.vect.z)
+			bpy_obj.location = self.convert_translation(state.vect)
 			bpy_obj.keyframe_insert(data_path="location", frame=f)
-			bpy_obj.rotation_quaternion = (state.quat.s, state.quat.x, state.quat.y, state.quat.z)
+			bpy_obj.rotation_quaternion = self.convert_quaternion(state.quat)
 			bpy_obj.keyframe_insert(data_path="rotation_quaternion", frame=f)
 
 	def find_node_by_index(self, target_index):
-		idx = 0
-		for block in self.msh.blocks:
-			nodes = [block.root] if block.root else []
-			while nodes:
-				curr = nodes.pop(0)
-				if idx == target_index: return curr
-				idx += 1
-				nodes.extend(curr.meshes)
-		return None
+		return self.objects_by_state_index.get(getattr(target_index, "value", target_index))
 
 	def create_local_mesh(self, mesh):
 		if not mesh.vertex: return None
@@ -339,7 +336,10 @@ class Load:
 	def create_normals(self, bm, normals):
 		try:
 			bm.polygons.foreach_set("use_smooth", [True] * len(bm.polygons))
-			bm.normals_split_custom_set_from_vertices(normals)
+			if len(normals) == len(bm.loops):
+				bm.normals_split_custom_set(normals)
+			elif len(normals) == len(bm.vertices):
+				bm.normals_split_custom_set_from_vertices(normals)
 		except: pass
 
 	def create_uvmap(self, bm, uvs):
@@ -347,7 +347,27 @@ class Load:
 		for i, uv in enumerate(uvs): uvl[i].uv = Vector((uv[0], 1.0 - uv[1]))
 
 	def create_matrix(self, m):
-		return Matrix(list(m)).transposed()
+		raw = Matrix(list(m)).transposed()
+		if not self.opt["rotate_for_yz"]:
+			return raw
+		return BZ2_TO_BLENDER @ raw @ BZ2_TO_BLENDER
+
+	def convert_translation(self, vect):
+		raw = Vector((vect.x, vect.y, vect.z))
+		if not self.opt["rotate_for_yz"]:
+			return raw
+		return BZ2_TO_BLENDER_3 @ raw
+
+	def convert_quaternion(self, quat):
+		w = getattr(quat, "s", getattr(quat, "w", 1.0))
+		raw = Quaternion((w, quat.x, quat.y, quat.z))
+		if raw.magnitude == 0.0:
+			return Quaternion((1.0, 0.0, 0.0, 0.0))
+		raw = raw.normalized()
+		if not self.opt["rotate_for_yz"]:
+			return raw
+		rot = raw.to_matrix().to_4x4()
+		return (BZ2_TO_BLENDER @ rot @ BZ2_TO_BLENDER).to_quaternion().normalized()
 
 	def create_object(self, name, data, mat, parent=None):
 		obj = bpy.data.objects.new(name, data)
