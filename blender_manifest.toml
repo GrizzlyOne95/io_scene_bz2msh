@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "io_scene_bz2msh"
-version = "1.1.0"
+version = "1.2.0"
 name = "Battlezone II MSH Importer"
-tagline = "Modern BZ2 MSH suite with full animation support."
+tagline = "Modern BZ2 MSH suite with animation, PAK import, and PIC texture support."
 maintainer = "GrizzlyOne95"
 type = "add-on"
 license = ["SPDX:MIT"]
@@ -16,4 +16,4 @@ homepage = "https://github.com/GrizzlyOne95/io_scene_bz2msh"
 issues = "https://github.com/GrizzlyOne95/io_scene_bz2msh/issues"
 
 [permissions]
-files = "Access textures and local MSH files"
+files = "Access local MSH/PAK files and decode or cache texture images"

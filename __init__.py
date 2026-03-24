@@ -1,7 +1,7 @@
 bl_info = {
 	"name": "BZ2 MSH format",
 	"author": "FruteSoftware@gmail.com & GrizzlyOne95",
-	"version": (1, 1, 0),
+	"version": (1, 2, 0),
 	"blender": (4, 5, 0),
 	"location": "File > Import-Export",
 	"description": "Battlezone II/CC MSH Importer",
@@ -30,6 +30,28 @@ from bpy_extras.io_utils import (
 	axis_conversion
 )
 
+if "bpy" in locals():
+	import importlib
+	if "bz2msh" in locals(): importlib.reload(bz2msh)
+	if "bz2pak" in locals(): importlib.reload(bz2pak)
+	if "softimage_pic" in locals(): importlib.reload(softimage_pic)
+	if "msh_blender_importer" in locals(): importlib.reload(msh_blender_importer)
+
+def pak_msh_items(self, context):
+	filepath = getattr(self, "filepath", "")
+	if not filepath or not filepath.casefold().endswith(".pak") or not os.path.exists(filepath):
+		return [("", "Select a .pak file", "")]
+
+	try:
+		from . import bz2pak
+		archive = bz2pak.PakArchive.read(filepath)
+		paths = archive.list_paths(extension=".msh")
+		if not paths:
+			return [("", "No .msh assets in archive", "")]
+		return [(path, path, "") for path in paths]
+	except Exception as exc:
+		return [("", f"PAK read failed: {exc}", "")]
+
 class ImportMSH(bpy.types.Operator, ImportHelper):
 	"""Import BZ2 MSH file"""
 	bl_idname = "import_scene.io_scene_bz2msh"
@@ -38,8 +60,21 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 	
 	directory: StringProperty(subtype="DIR_PATH")
 	filename_ext = ".msh"
-	filter_glob: StringProperty(default="*.msh", options={"HIDDEN"})
-	texture_image_ext_default = ".png .bmp .jpg .jpeg .gif .tga .dds .dxtbz2"
+	filter_glob: StringProperty(default="*.msh;*.pak", options={"HIDDEN"})
+	texture_image_ext_default = ".pic .png .bmp .jpg .jpeg .gif .tga .dds .dxtbz2"
+
+	pak_msh_path: EnumProperty(
+		name="Archive Asset",
+		description="MSH asset inside the selected PAK archive",
+		items=pak_msh_items
+	)
+
+	pak_cache_dir: StringProperty(
+		name="PAK Cache",
+		description="Optional directory used to cache extracted PAK contents",
+		subtype="DIR_PATH",
+		default=""
+	)
 	
 	files: CollectionProperty(
 		name="File Path",
@@ -109,6 +144,12 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		description="Automatically strip headers from .dxtbz2 files to create .dds files",
 		default=True,
 	)
+
+	convert_pic_textures: BoolProperty(
+		name="Convert PIC to PNG",
+		description="Decode Softimage PIC textures and save PNG copies next to the source images",
+		default=True
+	)
 	
 	place_at_cursor: BoolProperty(
 		name="Place at Cursor",
@@ -135,7 +176,15 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 	
 	def draw(self, context):
 		layout = self.layout
+		is_pak = self.filepath.casefold().endswith(".pak")
 		multi_select = self.multi_select_files()
+
+		if is_pak:
+			pak_layout = layout.box()
+			pak_layout.label(text="PAK Asset Selection", icon="PACKAGE")
+			pak_layout.prop(self, "pak_msh_path")
+			pak_layout.prop(self, "pak_cache_dir")
+			layout.separator()
 		
 		layout.prop(self, "import_mode", expand=True)
 		if self.import_mode == "GLOBAL":
@@ -165,6 +214,7 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		sub.enabled = self.import_mesh_materials
 		sub.prop(self, "find_textures", icon="TEXTURE_DATA")
 		sub.prop(self, "find_textures_ext")
+		sub.prop(self, "convert_pic_textures", icon="FILE_IMAGE")
 		sub.prop(self, "auto_convert_dxtbz2", icon="FILE_REFRESH")
 
 		layout.separator()
@@ -181,19 +231,72 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 	
 	def execute(self, context):
 		from . import msh_blender_importer
-		keywords = self.as_keywords(ignore=("filter_glob", "directory"))
+		keywords = self.as_keywords(ignore=("filter_glob", "directory", "pak_msh_path", "pak_cache_dir"))
 		keywords["multi_select"] = self.multi_select_files()
+
+		if self.filepath.casefold().endswith(".pak"):
+			from . import bz2pak
+
+			if not self.pak_msh_path:
+				self.report({"ERROR"}, "Select an MSH asset inside the PAK archive")
+				return {"CANCELLED"}
+
+			cache_dir = self.pak_cache_dir.strip() if self.pak_cache_dir else None
+			archive, extract_root = bz2pak.ensure_extracted(self.filepath, cache_dir or None)
+			extracted_path = archive.extract_entry(self.pak_msh_path, extract_root, overwrite=False)
+			keywords["filepath"] = extracted_path
+			keywords["find_textures"] = True
+			keywords["texture_search_root"] = extract_root
+
 		return msh_blender_importer.load(self, context, **keywords)
 
+class ExtractPAK(bpy.types.Operator, ImportHelper):
+	"""Extract Battlezone II PAK archive"""
+	bl_idname = "import_scene.io_scene_bz2pak_extract_msh"
+	bl_label = "Extract PAK"
+	bl_options = {"PRESET"}
+
+	filename_ext = ".pak"
+	filter_glob: StringProperty(default="*.pak", options={"HIDDEN"})
+
+	output_dir: StringProperty(
+		name="Output Directory",
+		description="Directory to extract the archive contents into",
+		subtype="DIR_PATH",
+		default=""
+	)
+
+	def draw(self, context):
+		layout = self.layout
+		layout.prop(self, "output_dir")
+
+	def execute(self, context):
+		from . import bz2pak
+
+		output_dir = self.output_dir.strip() if self.output_dir else ""
+		if not output_dir:
+			output_dir = os.path.join(
+				os.path.dirname(self.filepath),
+				os.path.splitext(os.path.basename(self.filepath))[0]
+			)
+
+		archive = bz2pak.PakArchive.read(self.filepath)
+		archive.extract_all(output_dir, overwrite=True)
+		self.report({"INFO"}, f"Extracted {len(archive.entries)} files to {output_dir}")
+		return {"FINISHED"}
+
 def menu_func_import(self, context):
-	self.layout.operator(ImportMSH.bl_idname, text="BZ2 MSH (.msh)")
+	self.layout.operator(ImportMSH.bl_idname, text="BZ2 MSH / PAK (.msh, .pak)")
+	self.layout.operator(ExtractPAK.bl_idname, text="Battlezone II PAK Extractor (.pak)")
 
 def register():
 	bpy.utils.register_class(ImportMSH)
+	bpy.utils.register_class(ExtractPAK)
 	bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
 def unregister():
 	bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+	bpy.utils.unregister_class(ExtractPAK)
 	bpy.utils.unregister_class(ImportMSH)
 
 if __name__ == "__main__":
