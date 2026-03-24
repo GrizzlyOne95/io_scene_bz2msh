@@ -1,7 +1,10 @@
 """This module provides a parser and writer for BZ2 .msh files."""
 VERSION = 1.11
 
+import io
 import json
+import struct
+from math import isfinite
 from ctypes import sizeof, Structure, Array
 from ctypes import c_ubyte, c_int32, c_uint16, c_uint32, c_uint16, c_float
 
@@ -12,6 +15,7 @@ MSH_CHILD = 0xF74C51EE
 MSH_SIBLING = 0xB8990880
 MSH_END = 0xA93EB864
 MSH_EOF = 0xE3BB47F1
+MSH_SKINNED_SECTION = 0xF18F2BDE
 
 # From "renderflags.txt"
 DP_WAIT = 0x1
@@ -82,6 +86,56 @@ RS_BLEND_NODRAW = 0x40210000
 class ZeroLengthName(Exception): pass
 class UnknownBlock(Exception): pass
 class InvalidFormat(Exception): pass
+
+def peek_u32(f):
+	value = c_uint32()
+	start = f.tell()
+	f.readinto(value)
+	f.seek(start)
+	return value.value
+
+def make_identity_matrix():
+	matrix = Matrix()
+	for attr, values in (
+		("right", (1.0, 0.0, 0.0, 0.0)),
+		("up", (0.0, 1.0, 0.0, 0.0)),
+		("front", (0.0, 0.0, 1.0, 0.0)),
+		("posit", (0.0, 0.0, 0.0, 1.0)),
+	):
+		row = getattr(matrix, attr)
+		for index, value in enumerate(values):
+			row[index] = value
+	return matrix
+
+def looks_like_null_terminated_ascii(name_bytes):
+	return (
+		len(name_bytes) > 1
+		and name_bytes.endswith(b"\0")
+		and all(32 <= byte < 127 for byte in name_bytes[:-1])
+	)
+
+def looks_like_mesh_header(data, name_offset):
+	if name_offset + sizeof(c_uint16) > len(data):
+		return False
+	
+	name_length = int.from_bytes(data[name_offset:name_offset + 2], "little")
+	if not (1 < name_length < 256):
+		return False
+	
+	name_end = name_offset + 2 + name_length
+	if name_end + 12 + sizeof(Matrix) > len(data):
+		return False
+	
+	name_bytes = data[name_offset + 2:name_end]
+	if not looks_like_null_terminated_ascii(name_bytes):
+		return False
+	
+	is_single_geom = struct.unpack_from("<i", data, name_end + 4)[0]
+	if is_single_geom not in (-1, 0, 1):
+		return False
+	
+	matrix_values = struct.unpack_from("<16f", data, name_end + 12)
+	return all(isfinite(value) and abs(value) < 1e20 for value in matrix_values)
 
 def read_optional_blocks(f):
 	block_type_check = c_uint32()
@@ -514,6 +568,45 @@ class AnimList:
 			"states": [animkey.json() for animkey in self.states]
 		}
 
+class SkinnedSection:
+	def __init__(self, f=None, start_offset=0):
+		self.start_offset = start_offset
+		self.marker = MSH_SKINNED_SECTION
+		self.vertex_count = 0
+		self.face_count = 0
+		self.normal_count = 0
+		self.uv_count = 0
+		self.extra_count = 0
+		self.hierarchy_offset = 0
+		self.hierarchy_marker = 0
+		
+		if f:
+			self.read(f)
+	
+	def read(self, f):
+		fields = [c_uint32() for _ in range(6)]
+		for field in fields:
+			f.readinto(field)
+		self.marker = fields[0].value
+		self.vertex_count = fields[1].value
+		self.face_count = fields[2].value
+		self.normal_count = fields[3].value
+		self.uv_count = fields[4].value
+		self.extra_count = fields[5].value
+	
+	def json(self):
+		return {
+			"startOffset": self.start_offset,
+			"marker": self.marker,
+			"vertexCount": self.vertex_count,
+			"faceCount": self.face_count,
+			"normalCount": self.normal_count,
+			"uvCount": self.uv_count,
+			"extraCount": self.extra_count,
+			"hierarchyOffset": self.hierarchy_offset,
+			"hierarchyMarker": self.hierarchy_marker,
+		}
+
 class Mesh:
 	def __init__(self, f, block, level=0):
 		self.block = block
@@ -529,9 +622,13 @@ class Mesh:
 		self.vertex = (Vertex * 0)()
 		self.vert_groups = []
 		self.indices = (c_uint16 * 0)()
+		self.alt_vertices = (Vertex * 0)()
+		self.alt_unknown = (0.0, 0.0, 0.0)
+		self.alt_tail = []
 		
 		self.child = None
 		self.sibling = None
+		self.partial = False
 		
 		# Used to hierarchize like an XSI
 		self.meshes = []
@@ -600,13 +697,316 @@ class Mesh:
 			"localVertex": [vertex.json() for vertex in self.vertex]
 		}
 		
+		if self.alt_vertices:
+			j["altLocalVertex"] = [vertex.json() for vertex in self.alt_vertices]
+			j["altUnknown"] = list(self.alt_unknown)
+		
+		if self.alt_tail:
+			j["altTail"] = list(self.alt_tail)
+		
 		if self.child:
 			j["child"] = self.child.json()
 		
 		if self.sibling:
 			j["siblings"] = [self.sibling.json()]
 		
+		if self.partial:
+			j["partialRead"] = True
+		
 		return j
+
+def find_next_mesh_marker(f, block_end):
+	start = f.tell()
+	if start >= block_end:
+		return None
+	
+	data = f.read(block_end - start)
+	f.seek(start)
+	candidates = []
+	
+	for marker in (MSH_CHILD, MSH_SIBLING):
+		marker_bytes = marker.to_bytes(4, "little")
+		offset = data.find(marker_bytes)
+		while offset >= 0:
+			name_offset = offset + 4
+			if name_offset + sizeof(c_uint16) <= len(data):
+				if looks_like_mesh_header(data, name_offset):
+					cursor = f.tell()
+					valid = True
+					try:
+						f.seek(start + name_offset)
+						Mesh(f, None, 0)
+						valid = f.tell() <= block_end
+					except Exception:
+						pass
+					finally:
+						f.seek(cursor)
+					if valid:
+						candidates += [(start + offset, marker)]
+			offset = data.find(marker_bytes, offset + 1)
+	
+	if not candidates:
+		return None
+	return min(candidates, key=lambda item: item[0])
+
+def read_mesh_or_placeholder(f, block, level, block_end):
+	start = f.tell()
+	try:
+		return Mesh(f, block, level)
+	except Exception as original_error:
+		f.seek(start)
+		alt_mesh = read_alternate_mesh(f, block, level, block_end)
+		if alt_mesh:
+			return alt_mesh
+		
+		f.seek(start)
+		name_length = c_uint16()
+		f.readinto(name_length)
+		name_bytes = f.read(name_length.value)
+		if not looks_like_null_terminated_ascii(name_bytes):
+			raise original_error
+		
+		placeholder = Mesh(None, block, level)
+		placeholder.partial = True
+		placeholder.name = name_bytes[:-1].decode("ascii", "ignore")
+		f.readinto(placeholder.state_index)
+		f.readinto(placeholder.is_single_geom)
+		f.readinto(placeholder.renderflags)
+		f.readinto(placeholder.matrix)
+		
+		next_marker = find_next_mesh_marker(f, block_end)
+		if next_marker:
+			f.seek(next_marker[0])
+		else:
+			f.seek(block_end - sizeof(c_uint32))
+		return placeholder
+
+def plane_coefficients(plane):
+	# Plane records in these meshes are stored as x, y, z, d in file order.
+	return plane.d, plane.x, plane.y, plane.z
+
+def dot3(a, b):
+	return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def sub3(a, b):
+	return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+def cross3(a, b):
+	return (
+		a[1]*b[2] - a[2]*b[1],
+		a[2]*b[0] - a[0]*b[2],
+		a[0]*b[1] - a[1]*b[0],
+	)
+
+def normalize3(v):
+	length = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) ** 0.5
+	if length <= 1e-12:
+		return (0.0, 0.0, 1.0)
+	return (v[0] / length, v[1] / length, v[2] / length)
+
+def unique_vertex_indices(indices, positions, tolerance=1e-6):
+	unique = []
+	for index in indices:
+		position = positions[index]
+		if not any(all(abs(a - b) <= tolerance for a, b in zip(position, positions[other])) for other in unique):
+			unique += [index]
+	return unique
+
+def triangulate_plane_vertices(indices, positions, normal):
+	if len(indices) < 3:
+		return []
+	if len(indices) == 3:
+		return [tuple(indices)]
+	
+	centroid = (
+		sum(positions[index][0] for index in indices) / len(indices),
+		sum(positions[index][1] for index in indices) / len(indices),
+		sum(positions[index][2] for index in indices) / len(indices),
+	)
+	
+	if abs(normal[0]) < 0.9:
+		tangent = normalize3(cross3(normal, (1.0, 0.0, 0.0)))
+	else:
+		tangent = normalize3(cross3(normal, (0.0, 1.0, 0.0)))
+	bitangent = cross3(normal, tangent)
+	
+	ordered = sorted(
+		indices,
+		key=lambda index: __import__("math").atan2(
+			dot3(sub3(positions[index], centroid), bitangent),
+			dot3(sub3(positions[index], centroid), tangent),
+		),
+	)
+	
+	return [(ordered[0], ordered[i], ordered[i + 1]) for i in range(1, len(ordered) - 1)]
+
+def reconstruct_indices_from_planes(mesh, tolerance=1e-5):
+	positions = [(vertex.pos.x, vertex.pos.y, vertex.pos.z) for vertex in mesh.vertex]
+	triangles = []
+	seen = set()
+	
+	for plane in mesh.planes:
+		nx, ny, nz, d = plane_coefficients(plane)
+		candidate_indices = []
+		for index, position in enumerate(positions):
+			distance = nx*position[0] + ny*position[1] + nz*position[2] + d
+			if abs(distance) <= tolerance:
+				candidate_indices += [index]
+		
+		candidate_indices = unique_vertex_indices(candidate_indices, positions)
+		for triangle in triangulate_plane_vertices(candidate_indices, positions, normalize3((nx, ny, nz))):
+			key = tuple(sorted(triangle))
+			if key not in seen:
+				seen.add(key)
+				triangles += [triangle]
+	
+	if not triangles:
+		return False
+	
+	flat_indices = []
+	for triangle in triangles:
+		flat_indices += list(triangle)
+	mesh.indices = (c_uint16 * len(flat_indices))(*flat_indices)
+	if mesh.vert_groups:
+		mesh.vert_groups[0].index_count = c_uint32(len(flat_indices))
+	return True
+
+def finish_alternate_mesh(f, mesh, block_end):
+	count = c_uint32()
+	f.readinto(count)
+	mesh.vert_groups = []
+	for _ in range(count.value):
+		mesh.vert_groups += [VertGroup(f)]
+	
+	expected_indices = sum(group.index_count.value for group in mesh.vert_groups)
+	mesh.indices = (c_uint16 * 0)()
+	mesh.alt_tail = []
+	
+	while f.tell() + sizeof(c_uint32) <= block_end:
+		next_word = peek_u32(f)
+		if next_word in (MSH_CHILD, MSH_SIBLING, MSH_END, MSH_EOF):
+			break
+		if expected_indices and next_word == expected_indices:
+			f.readinto(count)
+			mesh.indices = (c_uint16 * count.value)()
+			f.readinto(mesh.indices)
+			break
+		
+		tail_word = c_uint32()
+		f.readinto(tail_word)
+		mesh.alt_tail += [tail_word.value]
+		if len(mesh.alt_tail) > 8:
+			return None
+	
+	if len(mesh.indices) == 0 and expected_indices:
+		reconstruct_indices_from_planes(mesh)
+	
+	mesh.partial = len(mesh.indices) == 0 and expected_indices > 0
+	return mesh
+
+def read_alternate_mesh_variant_1(f, block, level, block_end):
+	start = f.tell()
+	try:
+		mesh = Mesh(None, block, level)
+		name_length = c_uint16()
+		f.readinto(name_length)
+		name_bytes = f.read(name_length.value)
+		if not looks_like_null_terminated_ascii(name_bytes):
+			return None
+		
+		mesh.name = name_bytes[:-1].decode("ascii", "ignore")
+		f.readinto(mesh.state_index)
+		f.readinto(mesh.is_single_geom)
+		f.readinto(mesh.renderflags)
+		f.readinto(mesh.matrix)
+		
+		count = c_uint32()
+		f.readinto(count)
+		if count.value <= 0 or f.tell() + (count.value * sizeof(Vertex)) > block_end:
+			return None
+		mesh.alt_vertices = (Vertex * count.value)()
+		f.readinto(mesh.alt_vertices)
+		
+		alt_unknown = (c_float * 3)()
+		f.readinto(alt_unknown)
+		mesh.alt_unknown = tuple(alt_unknown)
+		
+		f.readinto(count)
+		if f.tell() + (count.value * sizeof(Plane)) > block_end:
+			return None
+		mesh.planes = (Plane * count.value)()
+		f.readinto(mesh.planes)
+		
+		f.readinto(count)
+		if count.value <= 0 or f.tell() + (count.value * sizeof(Vertex)) > block_end:
+			return None
+		mesh.vertex = (Vertex * count.value)()
+		f.readinto(mesh.vertex)
+		
+		return finish_alternate_mesh(f, mesh, block_end)
+	except Exception:
+		f.seek(start)
+		return None
+
+def read_alternate_mesh_variant_2(f, block, level, block_end):
+	start = f.tell()
+	try:
+		mesh = Mesh(None, block, level)
+		name_length = c_uint16()
+		f.readinto(name_length)
+		name_bytes = f.read(name_length.value)
+		if not looks_like_null_terminated_ascii(name_bytes):
+			return None
+		
+		mesh.name = name_bytes[:-1].decode("ascii", "ignore")
+		f.readinto(mesh.state_index)
+		f.readinto(mesh.is_single_geom)
+		f.readinto(mesh.renderflags)
+		f.readinto(mesh.matrix)
+		
+		count = c_uint32()
+		f.readinto(count)
+		if count.value <= 0 or f.tell() + (count.value * sizeof(Vertex)) > block_end:
+			return None
+		mesh.alt_vertices = (Vertex * count.value)()
+		f.readinto(mesh.alt_vertices)
+		
+		alt_unknown = (c_float * 2)()
+		f.readinto(alt_unknown)
+		mesh.alt_unknown = tuple(alt_unknown)
+		
+		f.readinto(count)
+		if count.value <= 0 or f.tell() + (count.value * sizeof(Color)) > block_end:
+			return None
+		mesh.vert_colors = (Color * count.value)()
+		f.readinto(mesh.vert_colors)
+		
+		f.readinto(count)
+		if f.tell() + (count.value * sizeof(Plane)) > block_end:
+			return None
+		mesh.planes = (Plane * count.value)()
+		f.readinto(mesh.planes)
+		
+		f.readinto(count)
+		if count.value <= 0 or f.tell() + (count.value * sizeof(Vertex)) > block_end:
+			return None
+		mesh.vertex = (Vertex * count.value)()
+		f.readinto(mesh.vertex)
+		
+		return finish_alternate_mesh(f, mesh, block_end)
+	except Exception:
+		f.seek(start)
+		return None
+
+def read_alternate_mesh(f, block, level, block_end):
+	start = f.tell()
+	for reader in (read_alternate_mesh_variant_1, read_alternate_mesh_variant_2):
+		f.seek(start)
+		mesh = reader(f, block, level, block_end)
+		if mesh:
+			return mesh
+	f.seek(start)
+	return None
 
 class Block:
 	def __init__(self, f, msh):
@@ -631,12 +1031,15 @@ class Block:
 		self.states = (AnimKey * 0)()
 		self.anim_list = []
 		self.root = None
+		self.skinned_section = None
+		self.synthetic_root = False
 		
 		if f:
 			self.read(f)
 	
 	def read(self, f):
 		f.readinto(self.block_info)
+		block_end = f.tell() + self.block_info.size
 		
 		count = c_uint32()
 		block_type = c_uint32()
@@ -712,22 +1115,39 @@ class Block:
 		for animlist_index in range(count.value):
 			self.animation_list += [AnimList(f)]
 		
-		self.root = Mesh(f, self, 0)
-		self.meshes = [self.root]
+		if peek_u32(f) == MSH_SKINNED_SECTION:
+			self.skinned_section = SkinnedSection(f, f.tell())
+			hierarchy_info = find_next_mesh_marker(f, block_end)
+			if not hierarchy_info:
+				raise UnknownBlock("Unhandled skinned mesh payload with no recoverable hierarchy.")
+			hierarchy_offset, hierarchy_marker = hierarchy_info
+			self.skinned_section.hierarchy_offset = hierarchy_offset
+			self.skinned_section.hierarchy_marker = hierarchy_marker
+			f.seek(hierarchy_offset)
+			
+			self.root = Mesh(None, self, 0)
+			self.root.name = self.name or "skinned_root"
+			self.root.matrix = make_identity_matrix()
+			self.synthetic_root = True
+		else:
+			self.root = read_mesh_or_placeholder(f, self, 0, block_end)
 		
-		in_mesh = 1
+		self.meshes = [self.root]
 		indentation_level = 0 # 0 is root level
 		mesh_at = [self.root]
 		
-		while in_mesh > 0:
+		while True:
+			while f.tell() + sizeof(c_uint32) <= block_end and peek_u32(f) == 0:
+				f.seek(sizeof(c_uint32), io.SEEK_CUR)
+			
 			f.readinto(block_type)
 			if block_type.value == MSH_CHILD:
-				this_mesh = Mesh(f, self, indentation_level + 1)
-				mesh_at[indentation_level].child = this_mesh
+				this_mesh = read_mesh_or_placeholder(f, self, indentation_level + 1, block_end)
+				if mesh_at[indentation_level].child is None:
+					mesh_at[indentation_level].child = this_mesh
 				mesh_at[indentation_level].meshes += [this_mesh]
 				
 				indentation_level += 1
-				in_mesh += 1
 				
 				if len(mesh_at) < indentation_level+1:
 					mesh_at += [this_mesh]
@@ -735,26 +1155,35 @@ class Block:
 					mesh_at[indentation_level] = this_mesh
 			
 			elif block_type.value == MSH_SIBLING:
-				this_mesh = Mesh(f, self, indentation_level)
-				mesh_at[indentation_level].sibling = this_mesh
-				mesh_at[indentation_level-1].meshes += [this_mesh]
-				mesh_at[indentation_level] = this_mesh
+				if indentation_level <= 0:
+					parent_level = 0
+					this_level = 1 if self.synthetic_root else 0
+					previous = mesh_at[1] if self.synthetic_root and len(mesh_at) > 1 else mesh_at[0]
+				else:
+					parent_level = indentation_level - 1
+					this_level = indentation_level
+					previous = mesh_at[indentation_level]
 				
-				in_mesh += 1
+				this_mesh = read_mesh_or_placeholder(f, self, this_level, block_end)
+				if previous:
+					previous.sibling = this_mesh
+				mesh_at[parent_level].meshes += [this_mesh]
+				
+				if len(mesh_at) < this_level + 1:
+					mesh_at += [this_mesh]
+				else:
+					mesh_at[this_level] = this_mesh
+				indentation_level = this_level
 			
 			elif block_type.value == MSH_END:
-				in_mesh -= 1
-				
-				while in_mesh < indentation_level:
+				if indentation_level > 0:
 					indentation_level -= 1
+			
+			elif block_type.value == MSH_EOF:
+				break
 			
 			else:
 				raise UnknownBlock("Unhandled Mesh Block %s - Note that oldpoop is not supported." % hex(block_type.value))
-		
-		f.readinto(block_type)
-		
-		if block_type.value != MSH_EOF:
-			raise InvalidFormat("Unexpected EOF")
 	
 	def walk(self):
 		if self.root:
@@ -787,6 +1216,9 @@ class Block:
 			
 			"mesh": self.root.json()
 		}
+		
+		if self.skinned_section:
+			j["skinnedSection"] = self.skinned_section.json()
 		
 		j.update(self.msh_header.json())
 		
