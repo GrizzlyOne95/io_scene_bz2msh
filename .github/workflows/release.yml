@@ -1,0 +1,45 @@
+name: Release BZ2 MSH Importer
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify manifest and addon versions
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          grep -F "version = \"$VERSION\"" blender_manifest.toml
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          grep -F "\"version\": ($MAJOR, $MINOR, $PATCH)" __init__.py
+
+      - name: Verify Python syntax
+        run: python -m py_compile __init__.py bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
+
+      - name: Build Blender Extension ZIP
+        shell: bash
+        run: |
+          zip io_scene_bz2msh-${GITHUB_REF_NAME}.zip __init__.py blender_manifest.toml bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
+          test "$(stat -c%s io_scene_bz2msh-${GITHUB_REF_NAME}.zip)" -gt 10000
+          unzip -l io_scene_bz2msh-${GITHUB_REF_NAME}.zip | grep -F 'blender_manifest.toml'
+          unzip -l io_scene_bz2msh-${GITHUB_REF_NAME}.zip | grep -F '__init__.py'
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          body_path: docs/RELEASE_NOTES_${{ github.ref_name }}.md
+          files: io_scene_bz2msh-${{ github.ref_name }}.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
