@@ -381,8 +381,8 @@ class BuckyDesc:
 	def json(self):
 		j = {
 			"flags": self.flags.value,
-			"indexCount": self.vert_count.value,
-			"vertCount": self.index_count.value
+			"indexCount": self.index_count.value,
+			"vertCount": self.vert_count.value
 		}
 		
 		if self.material:
@@ -1133,58 +1133,50 @@ class Block:
 			self.root = read_mesh_or_placeholder(f, self, 0, block_end)
 		
 		self.meshes = [self.root]
-		indentation_level = 0 # 0 is root level
-		mesh_at = [self.root]
-		
+		self.read_hierarchy(f, block_end)
+
+	def read_hierarchy(self, f, block_end):
+		"""Read the CHILD/SIBLING/END node stream that follows the root mesh.
+
+		Every node is closed by its own END, so the stream nests like brackets:
+		    node CHILD a ... END SIBLING b ... END END
+		CHILD opens the first child of the open node; SIBLING (which follows the
+		END of the previous sibling) opens the next child of the same parent.
+		A SIBLING directly after a node, with no END, implicitly closes that node.
+		"""
+		stack = [self.root]
+		just_opened = not self.synthetic_root  # the root node is open with no END yet
+		block_type = c_uint32()
+
 		while True:
 			while f.tell() + sizeof(c_uint32) <= block_end and peek_u32(f) == 0:
 				f.seek(sizeof(c_uint32), io.SEEK_CUR)
-			
+
 			f.readinto(block_type)
-			if block_type.value == MSH_CHILD:
-				this_mesh = read_mesh_or_placeholder(f, self, indentation_level + 1, block_end)
-				if mesh_at[indentation_level].child is None:
-					mesh_at[indentation_level].child = this_mesh
-				mesh_at[indentation_level].meshes += [this_mesh]
-				
-				indentation_level += 1
-				
-				if len(mesh_at) < indentation_level+1:
-					mesh_at += [this_mesh]
+			if block_type.value in (MSH_CHILD, MSH_SIBLING):
+				if block_type.value == MSH_SIBLING and just_opened and len(stack) > 1:
+					stack.pop()
+				parent = stack[-1]
+				this_mesh = read_mesh_or_placeholder(f, self, parent.level + 1, block_end)
+				if parent.meshes:
+					parent.meshes[-1].sibling = this_mesh
 				else:
-					mesh_at[indentation_level] = this_mesh
-			
-			elif block_type.value == MSH_SIBLING:
-				if indentation_level <= 0:
-					parent_level = 0
-					this_level = 1 if self.synthetic_root else 0
-					previous = mesh_at[1] if self.synthetic_root and len(mesh_at) > 1 else mesh_at[0]
-				else:
-					parent_level = indentation_level - 1
-					this_level = indentation_level
-					previous = mesh_at[indentation_level]
-				
-				this_mesh = read_mesh_or_placeholder(f, self, this_level, block_end)
-				if previous:
-					previous.sibling = this_mesh
-				mesh_at[parent_level].meshes += [this_mesh]
-				
-				if len(mesh_at) < this_level + 1:
-					mesh_at += [this_mesh]
-				else:
-					mesh_at[this_level] = this_mesh
-				indentation_level = this_level
-			
+					parent.child = this_mesh
+				parent.meshes += [this_mesh]
+				stack += [this_mesh]
+				just_opened = True
+
 			elif block_type.value == MSH_END:
-				if indentation_level > 0:
-					indentation_level -= 1
-			
+				if len(stack) > 1:
+					stack.pop()
+				just_opened = False
+
 			elif block_type.value == MSH_EOF:
 				break
-			
+
 			else:
 				raise UnknownBlock("Unhandled Mesh Block %s - Note that oldpoop is not supported." % hex(block_type.value))
-	
+
 	def walk(self):
 		if self.root:
 			yield self.root, 0 # 0 indentation level
