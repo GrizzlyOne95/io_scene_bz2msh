@@ -142,6 +142,60 @@ def verts_of_all_vertex_groups(mesh):
 		vert_start += vgroup.vert_count.value
 		index_start = index_end
 
+def is_skinned(block):
+	"""A skinned block carries one weight list per block vertex and bind matrices."""
+	return bool(block.msh_header.skinned) and len(block.vertices) > 0 and len(block.faces) > 0 \
+		and len(block.vert_to_state) == len(block.vertices) and len(block.state_matrices) > 0
+
+def block_parents(block):
+	parent = {}
+	for mesh, _ in block.walk():
+		for child in mesh.meshes:
+			parent[child.state_index.value] = mesh.state_index.value
+	return parent
+
+def action_fcurves(action):
+	"""All F-Curves of an Action (layered Actions in Blender 4.4+, legacy list before)."""
+	layers = getattr(action, "layers", None)
+	if layers:
+		for layer in layers:
+			for strip in layer.strips:
+				for bag in getattr(strip, "channelbags", []):
+					yield from bag.fcurves
+	elif hasattr(action, "fcurves"):
+		yield from action.fcurves
+
+def key_has_position(key):
+	return key.type in (1, 3)
+
+def key_has_rotation(key):
+	return key.type in (2, 3)
+
+def key_rotation(key):
+	"""Local rotation of an animation key: the stored quaternion is its conjugate
+	(the rotation in row-vector form, like the file matrices)."""
+	q = Quaternion((key.quat.s, key.quat.x, key.quat.y, key.quat.z))
+	return Quaternion((1.0, 0.0, 0.0, 0.0)) if q.magnitude == 0.0 else q.normalized().conjugated()
+
+def sample_vec(keys, f):
+	if f <= keys[0][0]: return keys[0][1]
+	for (f0, a), (f1, b) in zip(keys, keys[1:]):
+		if f0 <= f <= f1:
+			return a.lerp(b, 0.0 if f1 == f0 else (f - f0) / (f1 - f0))
+	return keys[-1][1]
+
+def sample_quat(keys, f):
+	if f <= keys[0][0]: return keys[0][1]
+	for (f0, a), (f1, b) in zip(keys, keys[1:]):
+		if f0 <= f <= f1:
+			return a.slerp(b, 0.0 if f1 == f0 else (f - f0) / (f1 - f0))
+	return keys[-1][1]
+
+def normalized(M):
+	"""Drop scale/shear: bones and pose keys are rigid."""
+	loc, rot, _ = M.decompose()
+	return Matrix.Translation(loc) @ rot.to_matrix().to_4x4()
+
 class Load:
 	def __init__(self, operator, context, filepath, as_collection, **opt):
 		self.operator = operator
@@ -179,19 +233,31 @@ class Load:
 		# Hierarchy Root Tracking
 		bpy_root_objects = []
 
+		self.armatures = []  # (armature object, block, {state index: bone name}, {state index: raw bind})
 		if opt["import_mode"] == "GLOBAL":
 			mesh_data = self.create_global_mesh(self.msh.blocks[0])
 			bpy_obj = self.create_object(self.msh.blocks[0].name, mesh_data, Matrix.Identity(4))
 			bpy_root_objects.append(bpy_obj)
 		else:
 			for block in self.msh.blocks:
-				if block.root:
+				if self.use_armature(block):
+					bpy_root_objects.append(self.create_skinned(block))
+				elif block.root:
 					root_obj = self.walk(block.root)
 					bpy_root_objects.append(root_obj)
 
 		# Apply Global Animations after objects are mapped
 		if opt.get("import_animations"):
+			existing_actions = set(bpy.data.actions)
 			self.apply_global_animations()
+			for arm_obj, block, bone_names, bind_raw in self.armatures:
+				self.apply_armature_animations(arm_obj, block, bone_names, bind_raw)
+			# MSH keys interpolate linearly; Blender's default Bezier would ease between them
+			for action in bpy.data.actions:
+				if action not in existing_actions:
+					for fcurve in action_fcurves(action):
+						for point in fcurve.keyframe_points:
+							point.interpolation = 'LINEAR'
 
 		# Final Scene Placement
 		for bpy_obj in bpy_root_objects:
@@ -346,72 +412,245 @@ class Load:
 			self.walk(msh_sub_mesh, bpy_obj)
 		return bpy_obj
 
+	def use_armature(self, block):
+		return self.opt.get("import_skinned_armature", True) and self.opt["import_mode"] != "GLOBAL" and is_skinned(block)
+
 	def apply_global_animations(self):
+		"""Object-transform clips: one Action per clip with a slot per animated object.
+		The first clip stays assigned; the others keep a fake user."""
+		first = {}
 		for block in self.msh.blocks:
+			if self.use_armature(block):
+				continue
 			for anim in getattr(block, "animation_list", []):
+				action = bpy.data.actions.new(name=f"{block.name}|{anim.name}")
+				action.use_fake_user = True
 				for sub_anim in anim.animations:
 					bpy_obj = self.find_node_by_index(sub_anim.index)
 					if bpy_obj:
-						self.apply_keyframes_to_object(bpy_obj, sub_anim, anim.name)
+						self.apply_keyframes_to_object(bpy_obj, sub_anim, action)
+						first.setdefault(bpy_obj.name, (bpy_obj, action))
+		for bpy_obj, action in first.values():
+			self.assign_action(bpy_obj, action)
 
-	def apply_keyframes_to_object(self, bpy_obj, sub_anim, action_name):
+	def assign_action(self, bpy_obj, action):
+		if not bpy_obj.animation_data: bpy_obj.animation_data_create()
+		bpy_obj.animation_data.action = action
+		slot = next((sl for sl in action.slots if sl.name_display == bpy_obj.name), None)
+		if slot is not None:
+			bpy_obj.animation_data.action_slot = slot
+
+	def apply_keyframes_to_object(self, bpy_obj, sub_anim, action):
+		"""MSH keys carry a type: 1 = position only, 2 = rotation only, 3 = both.
+		The stored quaternion is the rotation in row-vector form (see key_rotation)."""
 		if not bpy_obj.animation_data: bpy_obj.animation_data_create()
 		bpy_obj.rotation_mode = 'QUATERNION'
-		action = bpy.data.actions.new(name=f"{bpy_obj.name}_{action_name}")
 		bpy_obj.animation_data.action = action
-		slot = action.slots.new(name=bpy_obj.name, id_type='OBJECT')
-		bpy_obj.animation_data.action_slot = slot
+		bpy_obj.animation_data.action_slot = action.slots.new(id_type='OBJECT', name=bpy_obj.name)
 		for state in sub_anim.states:
 			f = state.frame
-			bpy_obj.location = self.convert_translation(state.vect)
-			bpy_obj.keyframe_insert(data_path="location", frame=f)
-			bpy_obj.rotation_quaternion = self.convert_quaternion(state.quat)
-			bpy_obj.keyframe_insert(data_path="rotation_quaternion", frame=f)
+			if key_has_position(state):
+				bpy_obj.location = self.convert_translation(state.vect)
+				bpy_obj.keyframe_insert(data_path="location", frame=f)
+			if key_has_rotation(state):
+				bpy_obj.rotation_quaternion = self.convert_quaternion(state.quat)
+				bpy_obj.keyframe_insert(data_path="rotation_quaternion", frame=f)
+
+	def apply_armature_animations(self, arm_obj, block, bone_names, bind_raw):
+		"""Skinned clips as pose-bone keys.  A key is the node transform relative to its
+		parent node, so pose basis = rest_local^-1 @ key_local (both in Blender space).
+		A channel with no keys in a clip holds its rest value."""
+		conv = self.conv4()
+		parent = block_parents(block)
+		rest_local = {}
+		for i, B in bind_raw.items():
+			rest_local[i] = normalized(B if i not in parent else bind_raw[parent[i]].inverted() @ B)
+		first = None
+		for anim in getattr(block, "animation_list", []):
+			action = bpy.data.actions.new(name=f"{arm_obj.name}|{anim.name}")
+			action.use_fake_user = True
+			if not arm_obj.animation_data: arm_obj.animation_data_create()
+			arm_obj.animation_data.action = action
+			arm_obj.animation_data.action_slot = action.slots.new(id_type='OBJECT', name=arm_obj.name)
+			first = first or action
+			animated = set()
+			for sub_anim in anim.animations:
+				i = getattr(sub_anim.index, "value", sub_anim.index)
+				if i not in bone_names: continue
+				animated.add(i)
+				pb = arm_obj.pose.bones[bone_names[i]]
+				pb.rotation_mode = 'QUATERNION'
+				R0 = rest_local[i]
+				pos = [(k.frame, Vector((k.vect.x, k.vect.y, k.vect.z))) for k in sub_anim.states if key_has_position(k)]
+				rot = [(k.frame, key_rotation(k)) for k in sub_anim.states if key_has_rotation(k)]
+				rest_inv = (conv @ R0 @ conv).inverted()
+				prev = None
+				for f in sorted({k.frame for k in sub_anim.states}):
+					t = sample_vec(pos, f) if pos else R0.to_translation()
+					q = sample_quat(rot, f) if rot else R0.to_quaternion()
+					A = Matrix.Translation(t) @ q.to_matrix().to_4x4()
+					loc, quat, _ = (rest_inv @ (conv @ A @ conv)).decompose()
+					if prev is not None and prev.dot(quat) < 0: quat.negate()
+					prev = quat
+					pb.location = loc
+					pb.rotation_quaternion = quat
+					pb.keyframe_insert(data_path="location", frame=f)
+					pb.keyframe_insert(data_path="rotation_quaternion", frame=f)
+			# bones the clip does not animate hold their rest pose, so switching
+			# actions never leaves them in the previous clip's pose
+			for i, name in bone_names.items():
+				if i in animated: continue
+				pb = arm_obj.pose.bones[name]
+				pb.rotation_mode = 'QUATERNION'
+				pb.location = (0.0, 0.0, 0.0)
+				pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+				pb.keyframe_insert(data_path="location", frame=0)
+				pb.keyframe_insert(data_path="rotation_quaternion", frame=0)
+		if first:
+			self.assign_action(arm_obj, first)
 
 	def find_node_by_index(self, target_index):
 		return self.objects_by_state_index.get(getattr(target_index, "value", target_index))
 
-	def create_local_mesh(self, mesh):
-		if not mesh.vertex: return None
-		verts = [(v.pos.x, v.pos.y, v.pos.z) for v in mesh.vertex]
-		faces, i_start, v_start = [], 0, 0
-		for vg in mesh.vert_groups:
-			i_end = i_start + vg.index_count.value
-			for i in range(i_start, i_end, 3):
-				faces.append([v_start + mesh.indices[i], v_start + mesh.indices[i+1], v_start + mesh.indices[i+2]])
-			v_start += vg.vert_count.value
-			i_start = i_end
-		bm = bpy.data.meshes.new(mesh.name)
+	def conv3(self):
+		return BZ2_TO_BLENDER_3 if self.opt["rotate_for_yz"] else Matrix.Identity(3)
+
+	def conv4(self):
+		return BZ2_TO_BLENDER if self.opt["rotate_for_yz"] else Matrix.Identity(4)
+
+	def build_mesh(self, name, positions, triangles, loop_normals=None, loop_uvs=None, face_materials=None):
+		"""positions: BZ2-space points; triangles: vertex index triples in file order;
+		loop_normals / loop_uvs: one per corner in the same order.  The mesh data is
+		converted into Blender space here like the object matrices (BZ2 is left-handed,
+		so the Y/Z swap also reverses the winding to keep faces pointing outward)."""
+		# Drop degenerate triangles (a repeated vertex) and out-of-range indices with their
+		# per-corner data: several stock meshes have them, and Blender's custom normals
+		# crash on such topology.
+		keep = [k for k, tri in enumerate(triangles) if len(set(tri)) == 3 and all(0 <= i < len(positions) for i in tri)]
+		if len(keep) != len(triangles):
+			pick = lambda seq: None if seq is None else [seq[3 * k + j] for k in keep for j in range(3)]
+			loop_normals, loop_uvs = pick(loop_normals), pick(loop_uvs)
+			face_materials = None if face_materials is None else [face_materials[k] for k in keep]
+			triangles = [triangles[k] for k in keep]
+		C = self.conv3()
+		order = (0, 2, 1) if C.determinant() < 0 else (0, 1, 2)
+		verts = [tuple(C @ Vector(p)) for p in positions]
+		faces = [[tri[j] for j in order] for tri in triangles]
+		bm = bpy.data.meshes.new(name)
 		bm.from_pydata(verts, [], faces)
-		
-		if self.opt["import_mesh_materials"]:
-			f_idx = 0
-			for vg in mesh.vert_groups:
-				mat = self.create_material(vg.material, vg.texture)
+		reorder = lambda seq: [seq[3 * k + j] for k in range(len(triangles)) for j in order]
+		if face_materials is not None:
+			for poly, mat in zip(bm.polygons, face_materials):
+				if mat is None: continue
 				if mat.name not in bm.materials: bm.materials.append(mat)
-				m_idx = bm.materials.find(mat.name)
-				count = vg.index_count.value // 3
-				for i in range(f_idx, f_idx + count):
-					bm.polygons[i].material_index = m_idx
-				f_idx += count
-		
-		if self.opt["import_mesh_uvmap"]:
-			self.create_uvmap(bm, [tuple(v.uv) for v in verts_of_all_vertex_groups(mesh)])
-		if self.opt["import_mesh_normals"]:
-			self.create_normals(bm, [tuple(v.norm) for v in verts_of_all_vertex_groups(mesh)])
+				poly.material_index = bm.materials.find(mat.name)
+		if self.opt["import_mesh_uvmap"] and loop_uvs is not None:
+			self.create_uvmap(bm, reorder(loop_uvs))
+		if self.opt["import_mesh_normals"] and loop_normals is not None:
+			self.create_normals(bm, [tuple((C @ Vector(n)).normalized()) for n in reorder(loop_normals)])
 		return bm
 
+	def create_local_mesh(self, mesh):
+		if not mesh.vertex: return None
+		positions = [(v.pos.x, v.pos.y, v.pos.z) for v in mesh.vertex]
+		triangles, face_materials, i_start, v_start = [], [], 0, 0
+		for vg in mesh.vert_groups:
+			i_end = i_start + vg.index_count.value
+			mat = self.create_material(vg.material, vg.texture) if self.opt["import_mesh_materials"] else None
+			for i in range(i_start, i_end, 3):
+				triangles.append((v_start + mesh.indices[i], v_start + mesh.indices[i+1], v_start + mesh.indices[i+2]))
+				face_materials.append(mat)
+			v_start += vg.vert_count.value
+			i_start = i_end
+		corners = [mesh.vertex[i] for tri in triangles for i in tri]
+		return self.build_mesh(mesh.name, positions, triangles,
+			[tuple(v.norm) for v in corners], [tuple(v.uv) for v in corners], face_materials)
+
+	def global_face_data(self, block):
+		"""Block-level geometry from the per-corner face records (vertex / normal / uv
+		index triples and a bucky = material index).  For skinned blocks this is the only
+		complete geometry: their block index list is empty."""
+		triangles = [tuple(face.verts) for face in block.faces]
+		normals = [tuple(block.vertex_normals[n]) for face in block.faces for n in face.norms] if block.vertex_normals else None
+		uvs = [tuple(block.uvs[u]) for face in block.faces for u in face.uvs] if block.uvs else None
+		materials = None
+		if self.opt["import_mesh_materials"] and block.buckydescriptions:
+			bucky_mats = [self.create_material(b.material, b.texture) for b in block.buckydescriptions]
+			materials = [bucky_mats[min(face.buckyIndex, len(bucky_mats) - 1)] for face in block.faces]
+		return triangles, normals, uvs, materials
+
 	def create_global_mesh(self, block):
-		verts = [tuple(v) for v in block.vertices]
-		faces, v_off, i_off = [], 0, 0
+		positions = [tuple(v) for v in block.vertices]
+		if block.faces and (self.opt.get("data_from_faces") or not block.indices):
+			return self.build_mesh(block.name, positions, *self.global_face_data(block))
+		triangles, v_off, i_off = [], 0, 0
 		for vg in block.vert_groups:
 			for i in range(i_off, i_off + vg.index_count.value, 3):
-				faces.append((block.indices[i]+v_off, block.indices[i+1]+v_off, block.indices[i+2]+v_off))
+				triangles.append((block.indices[i]+v_off, block.indices[i+1]+v_off, block.indices[i+2]+v_off))
 			v_off += vg.vert_count.value
 			i_off += vg.index_count.value
-		bm = bpy.data.meshes.new(block.name)
-		bm.from_pydata(verts, [], faces)
-		return bm
+		return self.build_mesh(block.name, positions, triangles)
+
+	def create_skinned(self, block):
+		"""Skinned block -> Armature (one bone per node; rest = the block bind matrices)
+		plus the block-level mesh weighted by vert_to_state under an Armature modifier.
+		The per-node local meshes are skipped: the block mesh already contains them."""
+		conv = self.conv4()
+		nodes = [mesh for mesh, _ in block.walk()]
+		parent = block_parents(block)
+		bind_raw = {}
+		for mesh in nodes:
+			i = mesh.state_index.value
+			if i < len(block.state_matrices):
+				# state matrices hold the inverse bind in row-vector form
+				bind_raw[i] = Matrix(list(block.state_matrices[i])).transposed().inverted()
+			else:
+				local = Matrix(list(mesh.matrix)).transposed()
+				bind_raw[i] = bind_raw[parent[i]] @ local if i in parent else local
+
+		arm = bpy.data.armatures.new(block.name)
+		arm_obj = bpy.data.objects.new(block.name, arm)
+		self.collection.objects.link(arm_obj)
+		self.bpy_objects.append(arm_obj)
+		view_layer = self.context.view_layer
+		prev_active = view_layer.objects.active
+		view_layer.objects.active = arm_obj
+		bpy.ops.object.mode_set(mode='EDIT')
+		bone_names, heads = {}, {}
+		for mesh in nodes:
+			i = mesh.state_index.value
+			eb = arm.edit_bones.new(mesh.name)
+			eb.head = (0.0, 0.0, 0.0)
+			eb.tail = (0.0, 0.1, 0.0)
+			eb.matrix = normalized(conv @ bind_raw[i] @ conv)
+			bone_names[i] = eb.name
+			heads[i] = eb.head.copy()
+		for mesh in nodes:
+			i = mesh.state_index.value
+			eb = arm.edit_bones[bone_names[i]]
+			if i in parent:
+				eb.parent = arm.edit_bones[bone_names[parent[i]]]
+			gaps = [(heads[c.state_index.value] - heads[i]).length for c in mesh.meshes]
+			gaps = [g for g in gaps if g > 1e-3]
+			eb.length = max(0.02, min(gaps)) if gaps else 0.05
+		bpy.ops.object.mode_set(mode='OBJECT')
+		view_layer.objects.active = prev_active
+
+		name = block.name + "_skin"
+		skin_obj = self.create_object(name, self.build_mesh(name, [tuple(v) for v in block.vertices], *self.global_face_data(block)),
+			Matrix.Identity(4), arm_obj)
+		groups = {}
+		for vi, entry in enumerate(block.vert_to_state):
+			for a in entry.array:
+				bone = bone_names.get(a.index)
+				if bone is None or a.weight <= 0.0: continue
+				if bone not in groups: groups[bone] = skin_obj.vertex_groups.new(name=bone)
+				groups[bone].add([vi], a.weight, 'REPLACE')
+		skin_obj.modifiers.new("Armature", 'ARMATURE').object = arm_obj
+		for i in bone_names:
+			self.objects_by_state_index.setdefault(i, arm_obj)
+		self.armatures.append((arm_obj, block, bone_names, bind_raw))
+		return arm_obj
 
 	def create_material(self, msh_mat, msh_tex):
 		name = msh_mat.name if msh_mat else "Default"
@@ -467,7 +706,7 @@ class Load:
 		raw = Quaternion((w, quat.x, quat.y, quat.z))
 		if raw.magnitude == 0.0:
 			return Quaternion((1.0, 0.0, 0.0, 0.0))
-		raw = raw.normalized()
+		raw = raw.normalized().conjugated()  # stored in row-vector form
 		if not self.opt["rotate_for_yz"]:
 			return raw
 		rot = raw.to_matrix().to_4x4()
@@ -481,5 +720,10 @@ class Load:
 		return obj
 
 def load(operator, context, filepath="", **opt):
-	Load(operator, context, filepath, opt["import_collection"], **opt)
+	multi_select = opt.pop("multi_select", None) or []
+	if multi_select:
+		for path in multi_select:
+			Load(operator, context, path, True, **opt)
+	else:
+		Load(operator, context, filepath, opt["import_collection"], **opt)
 	return {"FINISHED"}
