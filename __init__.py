@@ -163,6 +163,12 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		default=True
 	)
 	
+	import_skinned_armature: BoolProperty(
+		name="Skinned as Armature",
+		description="Import skinned models (characters, walkers) as an Armature with a weighted mesh instead of rigid node objects",
+		default=True
+	)
+
 	import_animations: BoolProperty(
 		name="Import Animations",
 		description="Import object transform animations from MSH (if present)",
@@ -223,6 +229,7 @@ class ImportMSH(bpy.types.Operator, ImportHelper):
 		anim_layout.label(text="Animations", icon='ACTION')
 		sub = anim_layout.column()
 		sub.prop(self, "import_animations", icon="ACTION")
+		sub.prop(self, "import_skinned_armature", icon="ARMATURE_DATA")
 		
 		layout.separator()
 		

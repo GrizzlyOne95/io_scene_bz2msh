@@ -42,7 +42,8 @@ This avoids stale-extension issues where valid BZ2 demo meshes may fail in Blend
 2.  Select either a loose `.msh` or a `.pak` archive.
 3.  If you selected a `.pak`, choose the in-archive `.msh` asset from the import panel.
 4.  **Import Options:**
-    * **Import Animations:** Creates Actions and Slots for any embedded keyframes.
+    * **Import Animations:** Creates one Action per clip (with a Slot per animated object) for any embedded keyframes. The first clip is assigned; the others are kept with a fake user.
+    * **Skinned as Armature:** Imports skinned models (pilots, creatures, walkers, some deployables) as an Armature plus one weighted mesh, with each clip as a bone Action.
     * **Global Mesh:** Imports the block as a single mesh object. Useful for quick static inspection, but it does not preserve animated sub-objects as separate Blender objects.
     * **Local Meshes:** Imports the full node hierarchy as separate objects. Use this mode for hardpoints, moving parts, and object-transform animations such as deploy/retract clips.
     * **Rotate Root Frames:** Converts BZ2 transforms into Blender-space. Leave this enabled unless you explicitly want raw source axes.
@@ -52,7 +53,12 @@ This avoids stale-extension issues where valid BZ2 demo meshes may fail in Blend
 
 ## Notes
 
-* BZ2 animation in `.msh` files is object-transform based, not armature/skinning based. Animated parts import as separate Blender objects with Actions.
+* Rigid `.msh` animation is object-transform based: animated parts import as separate Blender objects with Actions.
+* Skinned blocks (header `skinned = 1`) carry one weight list per block vertex (`vert_to_state`: weight + node state index) and per-node inverse bind matrices (`state_matrices`, row-vector form). With **Skinned as Armature** these import as an Armature whose rest pose is that bind, plus the block-level mesh with vertex groups. The per-node local meshes are skipped, because the block mesh already contains them.
+* Animation keys have a type: 1 = position only, 2 = rotation only, 3 = both. The stored quaternion is the conjugate of the local rotation (row-vector form, like the file matrices). Keys are relative to the parent node.
+* The node tree is a bracketed stream: every node is closed by its own END, and a SIBLING follows the END of the previous sibling. All 815 `.msh` files in BZ2R and the Workshop follow this.
+* BZ2 is left-handed. **Rotate Root Frames** converts the mesh data as well as the transforms, and reverses the face winding so normals stay outward.
+* `tests/` has headless Blender checks: `blender_corpus.py` (imports every file in a folder), `blender_render.py` (overview sheet), and `blender_dump_pose.py` + `check_skinned_import.py` (skinned poses against a numpy re-implementation of MSH skinning).
 * Animation clips are read from each parsed block's `animation_list`, not from a top-level file animation table.
 * The importer resolves animation targets by `state_index`, which is required for multi-part assets such as deployable structures and vehicles.
 * `Global Mesh` is best for static review. `Local Meshes` is the correct mode for animated assets.
