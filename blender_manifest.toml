@@ -18,7 +18,6 @@ files = "Access local MSH/PAK files and decode or cache texture images"
 [build]
 paths = [
   "__init__.py",
-  "blender_manifest.toml",
   "bcn.py",
   "bz2msh.py",
   "bz2pak.py",
