@@ -25,9 +25,9 @@ The importer is aimed at bringing game assets into Blender in a form that is use
 
 ## Current Development State
 
-The README documents the current `main` branch.
+The current development target is **v1.3.0**. The add-on now uses the Blender Extensions manifest as its authoritative package metadata: legacy `bl_info` metadata has been removed, and CI validates/builds the package with Blender's native `extension validate` and `extension build` commands.
 
-The formal **v1.2.0** release predates the newer hierarchy, skinned-armature, animation-correction, BZ2R `.material`, and BC4/BC5 work merged in late September 2026. Those newer changes are present on `main` and will appear in a packaged release when the repository is tagged again.
+The formal **v1.2.0** release predates the newer hierarchy, skinned-armature, animation-correction, BZ2R `.material`, BC4/BC5, and native Extensions-packaging work. Those changes are being prepared for the next packaged release.
 
 ## Installation
 
@@ -41,7 +41,7 @@ For normal installation, use the ZIP attached to a GitHub Release rather than Gi
 4. Open the Extensions menu and choose **Install from Disk...**.
 5. Select the downloaded ZIP and enable **Battlezone II MSH Importer**.
 
-The release archive is built with `blender_manifest.toml` and `__init__.py` at the archive root as required by Blender's Extensions system.
+The release archive is built with Blender's native Extensions tooling and contains `blender_manifest.toml` and `__init__.py` at the archive root. The release workflow validates both the source manifest and the final ZIP with the pinned Blender 4.5 LTS CLI before publishing.
 
 ### Development checkout
 
@@ -148,7 +148,21 @@ The hierarchy work was checked against **815 MSH files** from the BZ2R/Workshop 
 - `bcn.py` — BC4/BC5 DDS decoding, including BC5 normal reconstruction.
 - `sync_installed_extension.ps1` — Development helper for syncing a checkout into an installed Blender extension.
 - `tests/` — Headless Blender corpus, render, material, hierarchy/pose, and skinning validation tools.
-- `.github/workflows/release.yml` — Tag-driven packaged Blender Extension release workflow.
+- `.github/workflows/extension-ci.yml` — Pull-request/main validation using Blender's native Extension validator and builder.
+- `.github/workflows/release.yml` — Tag-driven packaged Blender Extension release workflow using the same native tooling.
+
+## Blender Extension Packaging
+
+This repository targets Blender's current **Extensions** system rather than the legacy add-on packaging model.
+
+- Package metadata and versioning live in `blender_manifest.toml`.
+- `__init__.py` contains registration/runtime code only; it no longer carries legacy `bl_info` metadata.
+- Internal runtime modules use package-relative imports so they work under Blender's extension namespace.
+- The manifest has an explicit build file list so tests, documentation, GitHub metadata, and development helpers are not accidentally shipped in the extension ZIP.
+- CI uses Blender **4.5.14 LTS** to validate the source manifest, build the ZIP, validate the built ZIP, and verify the exact runtime file set.
+- NumPy is used by the BC4/BC5 decoder from Blender's bundled Python environment; the extension does not run `pip` or install packages at runtime.
+
+Official publication on `extensions.blender.org` is a separate licensing/provenance decision and is not part of this migration.
 
 ## Compatibility
 
@@ -158,7 +172,7 @@ The hierarchy work was checked against **815 MSH files** from the BZ2R/Workshop 
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for details.
+The current Blender manifest declares `SPDX:MIT`, matching the repository's existing licensing statement. However, neither this fork nor the original upstream repository currently contains a standalone license file. Licensing/provenance should be resolved before considering submission to Blender's official Extensions Platform.
 
 ## Links
 
