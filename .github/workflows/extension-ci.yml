@@ -1,0 +1,95 @@
+name: Validate Blender Extension
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  BLENDER_VERSION: "4.5.14"
+
+jobs:
+  validate-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Python syntax
+        run: python -m py_compile __init__.py bcn.py bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
+
+      - name: Verify extension-only metadata
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tomllib
+
+          manifest = tomllib.loads(Path("blender_manifest.toml").read_text(encoding="utf-8"))
+          init_text = Path("__init__.py").read_text(encoding="utf-8")
+
+          if "bl_info" in init_text:
+              raise SystemExit("Legacy bl_info metadata must not be present in an Extension package")
+          if manifest.get("type") != "add-on":
+              raise SystemExit("Manifest type must be add-on")
+          if manifest.get("blender_version_min") != "4.5.0":
+              raise SystemExit("Minimum Blender version drifted from the supported 4.5 baseline")
+          if not manifest.get("website"):
+              raise SystemExit("Manifest website is required")
+          if "urls" in manifest:
+              raise SystemExit("Legacy [urls] table is not used by the Blender Extension schema")
+          print(f"Manifest metadata OK: {manifest['id']} {manifest['version']}")
+          PY
+
+      - name: Download Blender LTS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "https://download.blender.org/release/Blender4.5/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          tar -xJf "blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          echo "BLENDER_BIN=$RUNNER_TEMP/blender-${BLENDER_VERSION}-linux-x64/blender" >> "$GITHUB_ENV"
+
+      - name: Validate extension source
+        shell: bash
+        run: '"$BLENDER_BIN" --command extension validate'
+
+      - name: Build extension package
+        shell: bash
+        run: '"$BLENDER_BIN" --command extension build --output-filepath "$RUNNER_TEMP/io_scene_bz2msh-ci.zip"'
+
+      - name: Validate built package
+        shell: bash
+        run: '"$BLENDER_BIN" --command extension validate "$RUNNER_TEMP/io_scene_bz2msh-ci.zip"'
+
+      - name: Verify package contents
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+
+          package = os.path.join(os.environ["RUNNER_TEMP"], "io_scene_bz2msh-ci.zip")
+          expected = {
+              "__init__.py",
+              "blender_manifest.toml",
+              "bcn.py",
+              "bz2msh.py",
+              "bz2pak.py",
+              "msh_blender_importer.py",
+              "softimage_pic.py",
+          }
+
+          with zipfile.ZipFile(package) as zf:
+              names = {name.rstrip("/") for name in zf.namelist() if not name.endswith("/")}
+
+          if names != expected:
+              missing = sorted(expected - names)
+              extra = sorted(names - expected)
+              raise SystemExit(f"Unexpected package contents; missing={missing}, extra={extra}")
+
+          print("Built package contains only declared runtime files")
+          PY

@@ -8,30 +8,86 @@ on:
 permissions:
   contents: write
 
+env:
+  BLENDER_VERSION: "4.5.14"
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify manifest and addon versions
+      - name: Download Blender LTS
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          grep -F "version = \"$VERSION\"" blender_manifest.toml
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-          grep -F "\"version\": ($MAJOR, $MINOR, $PATCH)" __init__.py
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "https://download.blender.org/release/Blender4.5/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          tar -xJf "blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          echo "BLENDER_BIN=$RUNNER_TEMP/blender-${BLENDER_VERSION}-linux-x64/blender" >> "$GITHUB_ENV"
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+
+          with open("blender_manifest.toml", "rb") as f:
+              manifest = tomllib.load(f)
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected = tag.removeprefix("v")
+          actual = manifest["version"]
+          if actual != expected:
+              raise SystemExit(f"Tag {tag} does not match manifest version {actual}")
+          print(f"Release version verified: {actual}")
+          PY
 
       - name: Verify Python syntax
         run: python -m py_compile __init__.py bcn.py bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
 
-      - name: Build Blender Extension ZIP
+      - name: Validate extension source
+        shell: bash
+        run: '"$BLENDER_BIN" --command extension validate'
+
+      - name: Build Blender Extension
         shell: bash
         run: |
-          zip io_scene_bz2msh-${GITHUB_REF_NAME}.zip __init__.py blender_manifest.toml bcn.py bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
-          test "$(stat -c%s io_scene_bz2msh-${GITHUB_REF_NAME}.zip)" -gt 10000
-          unzip -l io_scene_bz2msh-${GITHUB_REF_NAME}.zip | grep -F 'blender_manifest.toml'
-          unzip -l io_scene_bz2msh-${GITHUB_REF_NAME}.zip | grep -F '__init__.py'
+          "$BLENDER_BIN" --command extension build             --output-filepath "$GITHUB_WORKSPACE/io_scene_bz2msh-${GITHUB_REF_NAME}.zip"
+
+      - name: Validate built extension
+        shell: bash
+        run: '"$BLENDER_BIN" --command extension validate "$GITHUB_WORKSPACE/io_scene_bz2msh-${GITHUB_REF_NAME}.zip"'
+
+      - name: Verify release package contents
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+
+          package = f"io_scene_bz2msh-{os.environ['GITHUB_REF_NAME']}.zip"
+          expected = {
+              "__init__.py",
+              "blender_manifest.toml",
+              "bcn.py",
+              "bz2msh.py",
+              "bz2pak.py",
+              "msh_blender_importer.py",
+              "softimage_pic.py",
+          }
+
+          with zipfile.ZipFile(package) as zf:
+              names = {name.rstrip("/") for name in zf.namelist() if not name.endswith("/")}
+
+          if names != expected:
+              missing = sorted(expected - names)
+              extra = sorted(names - expected)
+              raise SystemExit(f"Unexpected package contents; missing={missing}, extra={extra}")
+
+          print("Extension package contents verified")
+          PY
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
