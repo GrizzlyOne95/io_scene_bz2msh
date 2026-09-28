@@ -1,92 +1,173 @@
 Forked from https://github.com/frute94/io_scene_bz2msh/tree/main
 
-# Battlezone II/Combat Commander MSH Importer for Blender 4.5 LTS
+# Battlezone II / Combat Commander MSH Importer for Blender 4.5 LTS
 
-A modern, high-performance Blender Extension for importing `.msh` 3d model assets from **Battlezone Combat Commander** and **Battlezone II**. This tool is designed specifically for the Blender 4.5+ ecosystem, supporting the new layered animation system and Vulkan-based viewport.
+A Blender 4.5+ Extension for importing Battlezone II and Battlezone: Combat Commander `.msh` assets, including rigid hierarchy animation, skinned meshes, BZ2/BZCC materials and textures, and assets stored inside `.pak` archives.
 
-## Features
+The importer is aimed at bringing game assets into Blender in a form that is useful for inspection, animation work, conversion, and further modding rather than only producing a static mesh.
 
-* **Global & Local Support:** Correctly handles both global geometry (origin-offset) and local hierarchy meshes.
-* **Intelligent Mesh Indexing:** Respects vertex group relative indexing to prevent "origin-clumping."
-* **Layered Animations:** Imports block-level object animations into Blender 4.5 **Action Slots**, mapping clips by MSH `state_index` so moving parts land on the correct objects.
-* **Blender-Space Transform Baking:** Local transforms and animation keyframes are converted into Blender-space channels when `Rotate Root Frames` is enabled, so Action Editor values match the viewport orientation.
-* **Material Mapping:** Automatically searches for and applies textures/materials based on BZ2 path logic. Multiple materials are supported now!
-* **BZ2R / BZCC `.material` Files:** Meshes that name a `.material` file get its diffuse, specular (tint + gloss -> roughness), normal and emissive maps wired into the Principled BSDF; the team-colour mask is added as an unlinked image node. Textures are also looked up in a `Textures` subfolder (the BZ2R layout).
-* **BC4/BC5 DDS:** Blender cannot load BC4/BC5 DDS (every BZCC normal map is BC5_SNORM); these are decoded by the add-on (`bcn.py`, numpy) into packed images, with the normal Z rebuilt.
-* **DXTBZ2 Conversion:** Auto-converts detected `.dxtbz2` textures to `.dds` and loads them into Blender materials.
-* **PAK Import:** Browse `.msh` assets directly inside Battlezone II `.pak` archives and cache extracted contents automatically.
-* **Softimage PIC Support:** Loads `.pic` textures used by older assets and can cache decoded `.png` copies next to the originals.
+## Highlights
 
-## Installation (Blender 4.5+)
+- **Loose MSH and PAK import:** Import individual `.msh` files or browse MSH assets directly inside Battlezone II `.pak` archives.
+- **Correct BZ2 hierarchy parsing:** The node stream is parsed as the bracketed hierarchy used by the game/exporter, preserving parent/child/sibling relationships.
+- **Rigid and skinned models:** Rigid assets import as Blender object hierarchies; skinned assets can import as an Armature plus a weighted mesh.
+- **Animation clips:** Embedded clips import as Blender Actions using Blender 4.5 Action Slots.
+- **Channel-aware animation keys:** Position-only, rotation-only, and combined MSH keys are handled independently, with linear interpolation and rest-channel resets to avoid pose bleed between clips.
+- **Blender-space conversion:** With **Rotate Root Frames** enabled, mesh positions, normals, object transforms, bind data, and animation channels are converted from BZ2 space into Blender space. Face winding is corrected for BZ2's left-handed coordinate system.
+- **Global and local import modes:** Use a single global mesh for fast static inspection, or preserve the full local hierarchy for moving parts, hardpoints, animations, and rigs.
+- **Multiple materials:** Face material assignments are preserved instead of collapsing the asset to one material.
+- **BZ2R / BZCC `.material` support:** Diffuse, specular, normal, and emissive maps are wired into Principled BSDF materials. Team-colour masks are imported as image nodes for inspection/use.
+- **BC4 / BC5 DDS decoding:** BC4/BC5 textures that Blender cannot load natively are decoded by the extension. BZCC BC5_SNORM normal maps have their Z component reconstructed automatically.
+- **DXTBZ2 textures:** Supported `.dxtbz2` textures can be converted to DDS on demand.
+- **Softimage PIC textures:** Older `.pic` textures are decoded directly and can optionally be cached as PNG.
+- **Multi-file import:** Selecting multiple loose MSH files imports each asset as its own collection.
+- **PAK extraction:** A separate PAK extractor is available from Blender's Import menu.
 
-The easiest way to install this is using the new **Extensions** system:
+## Current Development State
 
-1.  **Download:** Click the green `<> Code` button and select **Download ZIP**.
-2.  **Open Blender:** Go to `Edit > Preferences > Extensions`.
-3.  **Install:** * Click the **down-arrow icon** in the top-right corner.
-    * Select **Install from Disk...**.
-    * Navigate to the downloaded `.zip` file and select it.
-4.  **Enable:** Ensure the "Battlezone II MSH Importer" is toggled on.
+The README documents the current `main` branch.
 
-## Development Sync
+The formal **v1.2.0** release predates the newer hierarchy, skinned-armature, animation-correction, BZ2R `.material`, and BC4/BC5 work merged in late September 2026. Those newer changes are present on `main` and will appear in a packaged release when the repository is tagged again.
 
-If you are developing from this checkout and Blender is loading a separately installed copy from `%APPDATA%`, keep that installed extension in sync with:
+## Installation
+
+### Packaged release
+
+For normal installation, use the ZIP attached to a GitHub Release rather than GitHub's generic **Code > Download ZIP** archive.
+
+1. Open the repository's **Releases** page.
+2. Download the packaged extension ZIP, for example `io_scene_bz2msh-v1.2.0.zip`.
+3. In Blender 4.5+, open **Edit > Preferences > Extensions**.
+4. Open the Extensions menu and choose **Install from Disk...**.
+5. Select the downloaded ZIP and enable **Battlezone II MSH Importer**.
+
+The release archive is built with `blender_manifest.toml` and `__init__.py` at the archive root as required by Blender's Extensions system.
+
+### Development checkout
+
+If you are developing from this repository while Blender is loading a separately installed copy from `%APPDATA%`, keep the installed extension synchronized with:
 
 ```powershell
 .\sync_installed_extension.ps1
 ```
 
-This avoids stale-extension issues where valid BZ2 demo meshes may fail in Blender with errors such as `Unhandled Mesh Block 0x0` or unexpected `MemoryError` exceptions even though the repo parser already handles them.
+This avoids testing an older installed copy when the repository parser/importer has already changed.
 
 ## Usage
 
-1.  Go to `File > Import > Battlezone II MSH / PAK (.msh, .pak)`.
-2.  Select either a loose `.msh` or a `.pak` archive.
-3.  If you selected a `.pak`, choose the in-archive `.msh` asset from the import panel.
-4.  **Import Options:**
-    * **Import Animations:** Creates one Action per clip (with a Slot per animated object) for any embedded keyframes. The first clip is assigned; the others are kept with a fake user.
-    * **Skinned as Armature:** Imports skinned models (pilots, creatures, walkers, some deployables) as an Armature plus one weighted mesh, with each clip as a bone Action.
-    * **Global Mesh:** Imports the block as a single mesh object. Useful for quick static inspection, but it does not preserve animated sub-objects as separate Blender objects.
-    * **Local Meshes:** Imports the full node hierarchy as separate objects. Use this mode for hardpoints, moving parts, and object-transform animations such as deploy/retract clips.
-    * **Rotate Root Frames:** Converts BZ2 transforms into Blender-space. Leave this enabled unless you explicitly want raw source axes.
-    * **Find Textures:** Searches adjacent folders (like `/bitmaps/` and `/Textures/`) for matching textures and `.material` files.
-    * **Auto-convert .dxtbz2:** Converts supported `.dxtbz2` textures to `.dds` on demand before loading them into Blender.
-    * **Convert PIC to PNG:** Decodes Softimage `.pic` textures and optionally caches `.png` copies so re-imports are faster.
+### Import an MSH or an asset from a PAK
 
-## Notes
+1. In Blender, go to **File > Import > BZ2 MSH / PAK (.msh, .pak)**.
+2. Select a loose `.msh` file, multiple loose `.msh` files, or a `.pak` archive.
+3. For a PAK, choose the in-archive MSH from **Archive Asset**.
+4. Configure the import options and import.
 
-* Rigid `.msh` animation is object-transform based: animated parts import as separate Blender objects with Actions.
-* Skinned blocks (header `skinned = 1`) carry one weight list per block vertex (`vert_to_state`: weight + node state index) and per-node inverse bind matrices (`state_matrices`, row-vector form). With **Skinned as Armature** these import as an Armature whose rest pose is that bind, plus the block-level mesh with vertex groups. The per-node local meshes are skipped, because the block mesh already contains them.
-* Animation keys have a type: 1 = position only, 2 = rotation only, 3 = both. The stored quaternion is the conjugate of the local rotation (row-vector form, like the file matrices). Keys are relative to the parent node.
-* The node tree is a bracketed stream: every node is closed by its own END, and a SIBLING follows the END of the previous sibling. All 815 `.msh` files in BZ2R and the Workshop follow this.
-* BZ2 is left-handed. **Rotate Root Frames** converts the mesh data as well as the transforms, and reverses the face winding so normals stay outward.
-* `tests/` has headless Blender checks: `blender_corpus.py` (imports every file in a folder), `blender_render.py` (overview sheet), `check_materials.py` (every map a `.material` file names is loaded, non-empty and linked), and `blender_dump_pose.py` + `check_skinned_import.py` (skinned poses against a numpy re-implementation of MSH skinning).
-* Materials without a name differ only by colour, so they import as `Solid_<rrggbb>` instead of all sharing one material.
-* Rigid clips key the rest value of every channel they leave unkeyed on parts that any clip animates (e.g. location when a clip keys only rotation), so switching Actions never leaves a part in the previous clip's pose. Skinned clips already did this for their bones.
-* A few meshes store two key tracks for one node index (all of them also have two nodes with the same name, e.g. the BZ2R pilots' two `handl`). Tracks apply in file order: per channel, the last track that keys it wins, the rule `check_skinned_import.py` uses. Interleaving their keys gave poses up to 10 cm off on the pilots' death/crouch clips.
-* Open question: skinned channels a clip does not key hold the **bind** local (`state_matrices`). Some meshes' node matrices hold a different pose (e.g. the Lancer's wings), and which one the engine uses for unkeyed channels is unverified.
-* Animation clips are read from each parsed block's `animation_list`, not from a top-level file animation table.
-* The importer resolves animation targets by `state_index`, which is required for multi-part assets such as deployable structures and vehicles.
-* `Global Mesh` is best for static review. `Local Meshes` is the correct mode for animated assets.
+When a PAK asset is imported, the archive contents are extracted to a cache location so referenced textures/materials can be resolved with the mesh.
+
+### Extract a PAK
+
+Use **File > Import > Battlezone II PAK Extractor (.pak)** to extract an archive without importing a model.
+
+## Important Import Options
+
+- **Import Animations:** Imports embedded MSH clips as Actions. Rigid assets receive object Actions; skinned assets receive bone Actions.
+- **Skinned as Armature:** Enabled by default. Imports skinned blocks as an Armature plus the block-level weighted mesh instead of a set of rigid node meshes.
+- **Global Mesh:** Builds one mesh from the block. Useful for static review and quick geometry inspection.
+- **Local Meshes:** Preserves the complete object hierarchy. This is the preferred mode for hardpoints, moving parts, deploy/retract animation, and skinned assets.
+- **Rotate Root Frames:** Converts BZ2 coordinate data into Blender-space orientation. Leave this enabled unless you explicitly need raw source-space data.
+- **Normals / Vertex Colors / Materials / UV Maps:** Toggle individual mesh-data channels.
+- **Recursive Image Search:** Searches for associated images beyond the immediate asset folder. This can be slow on large trees.
+- **Auto-convert .dxtbz2:** Converts supported DXT-BZ2 textures to DDS when needed.
+- **Convert PIC to PNG:** Decodes Softimage PIC textures and optionally saves PNG copies for faster reuse.
+
+## Materials and Texture Lookup
+
+The importer supports both older single-texture material references and newer BZ2R/BZCC `.material` files.
+
+For `.material` assets, the importer recognizes:
+
+- `diffuse`
+- `specular`
+- `normal`
+- `emissive`
+- `teamcolor`
+
+Texture lookup includes the asset directory, common `bitmaps` paths, BZ2R-style `Textures` paths, and any configured search root such as an extracted PAK cache.
+
+Unnamed MSH materials are kept distinct by colour using names such as `Solid_<rrggbb>` rather than being collapsed into a single default material.
+
+## Animation and Skinning Notes
+
+Rigid MSH animation is object-transform based. Animated nodes import as separate Blender objects with Actions.
+
+Skinned blocks carry:
+
+- one weight list per block vertex in `vert_to_state`;
+- per-node inverse bind matrices in `state_matrices`;
+- animation tracks addressed by node/state index.
+
+With **Skinned as Armature**, the importer creates the armature rest pose from the bind data, builds vertex groups from the MSH weights, and imports each clip as a bone Action.
+
+MSH animation keys use:
+
+- `1` = position;
+- `2` = rotation;
+- `3` = position + rotation.
+
+The stored quaternion is interpreted as the conjugate of the local rotation used by the row-vector MSH transform data. Keys are relative to the parent node and use linear interpolation.
+
+A small number of assets contain duplicate key tracks for the same node index. For each channel, the last applicable track in file order wins, matching the validated skinning reference path.
+
+### Known research point
+
+For skinned clips, channels not keyed by a clip currently hold the bind-local value derived from `state_matrices`. Some assets contain a different posed transform in the node matrices, so the exact engine behavior for those unkeyed channels is still an open reverse-engineering question.
+
+## Validation
+
+The current parser/importer work includes headless Blender and independent reference checks.
+
+Notable coverage includes:
+
+- hierarchy round-trip checks across the BZ2R/Workshop MSH corpus;
+- local and global Blender corpus imports;
+- render overview generation;
+- independent numpy skinning comparison against evaluated Blender poses;
+- BZ2R/BZCC material-map loading checks;
+- BC4/BC5 texture decode validation.
+
+The hierarchy work was checked against **815 MSH files** from the BZ2R/Workshop corpus, and the corrected reader preserves the node trees written by the format.
 
 ## Repository Structure
 
-For developers looking to contribute, the structure is optimized for the Blender Extension manifest:
+- `__init__.py` — Blender Extension registration, UI, import operators, multi-file handling, and PAK extraction entry points.
+- `blender_manifest.toml` — Blender 4.5 Extension metadata and permissions.
+- `bz2msh.py` — Low-level Battlezone II MSH parser and format structures.
+- `msh_blender_importer.py` — Blender mesh, hierarchy, material, rig, and animation creation.
+- `bz2pak.py` — Battlezone II PAK reading, browsing, extraction, and cache support.
+- `softimage_pic.py` — Softimage PIC texture decoding.
+- `bcn.py` — BC4/BC5 DDS decoding, including BC5 normal reconstruction.
+- `sync_installed_extension.ps1` — Development helper for syncing a checkout into an installed Blender extension.
+- `tests/` — Headless Blender corpus, render, material, hierarchy/pose, and skinning validation tools.
+- `.github/workflows/release.yml` — Tag-driven packaged Blender Extension release workflow.
 
-* `blender_manifest.toml`: Metadata and permissions for Blender 4.5.
-* `__init__.py`: Handles the UI and registration.
-* `msh_blender_importer.py`: The core logic for mesh and animation creation.
-* `bz2msh.py`: The low-level binary parser for the .msh format.
+## Compatibility
+
+- **Blender:** 4.5 LTS or newer
+- **Source assets:** Battlezone II and Battlezone: Combat Commander / BZ2 Redux MSH content
+- **Import sources:** loose `.msh` files and Battlezone II `.pak` archives
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the MIT License. See `LICENSE` for details.
 
 ## Links
 
-* **GitHub:** [GrizzlyOne95/io_scene_bz2msh](https://github.com/GrizzlyOne95/io_scene_bz2msh)
-* **Issues:** [Report a Bug](https://github.com/GrizzlyOne95/io_scene_bz2msh/issues)
+- **Repository:** https://github.com/GrizzlyOne95/io_scene_bz2msh
+- **Issues:** https://github.com/GrizzlyOne95/io_scene_bz2msh/issues
+- **Original project:** https://github.com/frute94/io_scene_bz2msh
 
+## Credits
 
-Original plugin developed by frute94, original credits there:
-"Import logic for local mesh & material imports fixed by ZerothDivision and tested by GrizzlyOne95"
+Original plugin by frute94.
+
+Earlier local mesh/material import fixes were credited to ZerothDivision and tested by GrizzlyOne95. This fork modernizes the importer for Blender 4.5+ and continues format/parser, animation, skinning, archive, and material support work.
