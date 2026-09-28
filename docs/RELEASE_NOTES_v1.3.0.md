@@ -41,6 +41,12 @@ The extension continues to target Blender 4.5 LTS and later.
 
 Do not use GitHub's generic source-code ZIP as the install package.
 
-## Licensing Note
+## Licensing and Provenance Warning
 
-This release preserves the repository's existing `SPDX:MIT` manifest declaration. Official submission to `extensions.blender.org` is intentionally out of scope until the inherited-code licensing/provenance is resolved.
+**This version is intentionally created as a draft GitHub release while inherited-code licensing provenance remains unresolved.**
+
+The original `frute94/io_scene_bz2msh` repository has no license file or explicit open-source license grant in its visible history. The manifest's historical `SPDX:MIT` value is retained temporarily for Blender development-package validation; it is not treated as proof that the inherited upstream implementation was licensed under MIT.
+
+Do not submit this version to Blender's official Extensions Platform. The planned resolution is a provenance-documented replacement of the remaining inherited implementation, followed by an explicit project license suitable for distribution and, if desired, `GPL-3.0-or-later` publication through Blender's official platform.
+
+See `docs/LICENSING_PROVENANCE.md`.
