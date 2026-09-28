@@ -2,8 +2,9 @@ name: Release BZ2 MSH Importer
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,17 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Download Blender LTS
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          curl -fsSLO "https://download.blender.org/release/Blender4.5/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
-          tar -xJf "blender-${BLENDER_VERSION}-linux-x64.tar.xz"
-          echo "BLENDER_BIN=$RUNNER_TEMP/blender-${BLENDER_VERSION}-linux-x64/blender" >> "$GITHUB_ENV"
-
-      - name: Verify release version
+      - name: Read manifest version
+        id: version
         shell: bash
         run: |
           python - <<'PY'
@@ -36,38 +31,73 @@ jobs:
           with open("blender_manifest.toml", "rb") as f:
               manifest = tomllib.load(f)
 
-          tag = os.environ["GITHUB_REF_NAME"]
-          expected = tag.removeprefix("v")
-          actual = manifest["version"]
-          if actual != expected:
-              raise SystemExit(f"Tag {tag} does not match manifest version {actual}")
-          print(f"Release version verified: {actual}")
+          version = manifest["version"]
+          tag = f"v{version}"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"version={version}\n")
+              out.write(f"tag={tag}\n")
+          print(f"Manifest release target: {tag}")
           PY
 
+      - name: Check whether version is already released
+        id: existing
+        shell: bash
+        run: |
+          git fetch --tags --force
+          if git rev-parse -q --verify "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.version.outputs.tag }} already exists; no release needed."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "${{ steps.version.outputs.tag }} is new; preparing release."
+          fi
+
+      - name: Verify release notes exist
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        run: |
+          test -f "docs/RELEASE_NOTES_v${{ steps.version.outputs.version }}.md"
+
       - name: Verify Python syntax
+        if: steps.existing.outputs.exists != 'true'
         run: python -m py_compile __init__.py bcn.py bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
 
+      - name: Download Blender LTS
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "https://download.blender.org/release/Blender4.5/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          tar -xJf "blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          echo "BLENDER_BIN=$RUNNER_TEMP/blender-${BLENDER_VERSION}-linux-x64/blender" >> "$GITHUB_ENV"
+
       - name: Validate extension source
+        if: steps.existing.outputs.exists != 'true'
         shell: bash
         run: '"$BLENDER_BIN" --command extension validate'
 
       - name: Build Blender Extension
+        if: steps.existing.outputs.exists != 'true'
         shell: bash
         run: |
-          "$BLENDER_BIN" --command extension build             --output-filepath "$GITHUB_WORKSPACE/io_scene_bz2msh-${GITHUB_REF_NAME}.zip"
+          "$BLENDER_BIN" --command extension build             --output-filepath "$GITHUB_WORKSPACE/io_scene_bz2msh-${{ steps.version.outputs.tag }}.zip"
 
       - name: Validate built extension
+        if: steps.existing.outputs.exists != 'true'
         shell: bash
-        run: '"$BLENDER_BIN" --command extension validate "$GITHUB_WORKSPACE/io_scene_bz2msh-${GITHUB_REF_NAME}.zip"'
+        run: '"$BLENDER_BIN" --command extension validate "$GITHUB_WORKSPACE/io_scene_bz2msh-${{ steps.version.outputs.tag }}.zip"'
 
       - name: Verify release package contents
+        if: steps.existing.outputs.exists != 'true'
         shell: bash
         run: |
           python - <<'PY'
           import os
           import zipfile
 
-          package = f"io_scene_bz2msh-{os.environ['GITHUB_REF_NAME']}.zip"
+          tag = os.environ["RELEASE_TAG"]
+          package = f"io_scene_bz2msh-{tag}.zip"
           expected = {
               "__init__.py",
               "blender_manifest.toml",
@@ -88,14 +118,26 @@ jobs:
 
           print("Extension package contents verified")
           PY
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
 
-      - name: Publish GitHub Release
+      - name: Create release tag
+        if: steps.existing.outputs.exists != 'true'
+        shell: bash
+        run: |
+          git tag "${{ steps.version.outputs.tag }}" "$GITHUB_SHA"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create draft GitHub Release
+        if: steps.existing.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ github.ref_name }}
-          body_path: docs/RELEASE_NOTES_${{ github.ref_name }}.md
-          files: io_scene_bz2msh-${{ github.ref_name }}.zip
-          draft: false
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Release ${{ steps.version.outputs.tag }}
+          body_path: docs/RELEASE_NOTES_v${{ steps.version.outputs.version }}.md
+          files: io_scene_bz2msh-${{ steps.version.outputs.tag }}.zip
+          draft: true
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
