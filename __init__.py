@@ -1,13 +1,3 @@
-bl_info = {
-	"name": "BZ2 MSH format",
-	"author": "FruteSoftware@gmail.com & GrizzlyOne95",
-	"version": (1, 2, 0),
-	"blender": (4, 5, 0),
-	"location": "File > Import-Export",
-	"description": "Battlezone II/CC MSH Importer",
-	"category": "Import-Export"
-}
-
 import os
 import bpy
 
@@ -29,13 +19,6 @@ from bpy_extras.io_utils import (
 	orientation_helper,
 	axis_conversion
 )
-
-if "bpy" in locals():
-	import importlib
-	if "bz2msh" in locals(): importlib.reload(bz2msh)
-	if "bz2pak" in locals(): importlib.reload(bz2pak)
-	if "softimage_pic" in locals(): importlib.reload(softimage_pic)
-	if "msh_blender_importer" in locals(): importlib.reload(msh_blender_importer)
 
 def pak_msh_items(self, context):
 	filepath = getattr(self, "filepath", "")
