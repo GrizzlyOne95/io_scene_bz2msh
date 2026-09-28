@@ -2,12 +2,13 @@ import bpy
 import re
 import os
 import ctypes
+from types import SimpleNamespace
 from ctypes import Structure, c_int, c_ubyte, c_uint32, c_uint
 from struct import unpack
 from mathutils import Matrix, Vector, Euler, Quaternion
 from bpy_extras import image_utils
 from math import radians
-from . import bz2msh, softimage_pic
+from . import bz2msh, softimage_pic, bcn
 
 # Define types used by the binary headers
 DWORD = c_uint32
@@ -85,7 +86,8 @@ NODE_HEIGHT = {
 	"diffuse": NODE_SPACING_Y,
 	"specular": 0,
 	"emissive": -NODE_SPACING_Y,
-	"normal": -(NODE_SPACING_Y*2)
+	"normal": -(NODE_SPACING_Y*2),
+	"teamcolor": NODE_SPACING_Y*2
 }
 
 BZ2_TO_BLENDER = Matrix((
@@ -115,9 +117,11 @@ def find_texture(texture_filepath, search_directories, acceptable_extensions, re
 	return file_name + original_extension
 
 def read_material_file(filepath, default_diffuse=None):
+	"""Texture maps of a BZ2R/BZCC .material file ([texture] section).  Keys are lower case:
+	diffuse, specular, normal, emissive and teamcolor (BZCC team colour mask)."""
 	re_section = re.compile(r"(?i)\s*\[([^\]]*)\]")
 	re_keyval = re.compile(r"(?i)\s*(\w+)\s*=\s*(.+)")
-	textures = {"diffuse": default_diffuse, "specular": None, "normal": None, "emissive": None}
+	textures = {"diffuse": default_diffuse, "specular": None, "normal": None, "emissive": None, "teamcolor": None}
 	in_texture = False
 	with open(filepath, "r") as f:
 		for line in f:
@@ -129,7 +133,7 @@ def read_material_file(filepath, default_diffuse=None):
 			if in_texture:
 				match = re_keyval.match(line)
 				if match:
-					key, value = match.group(1).lower(), match.group(2)
+					key, value = match.group(1).lower(), match.group(2).strip()
 					if key in textures: textures[key] = value
 	return textures
 
@@ -177,6 +181,32 @@ def key_rotation(key):
 	q = Quaternion((key.quat.s, key.quat.x, key.quat.y, key.quat.z))
 	return Quaternion((1.0, 0.0, 0.0, 0.0)) if q.magnitude == 0.0 else q.normalized().conjugated()
 
+def key_tracks(anim):
+	"""An animation's key tracks, one per node index.  A few meshes store two tracks for one
+	node index (all have two nodes of the same name, e.g. the BZ2R pilots' two "handl", so the
+	exporter likely matched tracks by name).  Tracks apply in file order, so per channel the
+	last track that keys it wins - the rule tests/check_skinned_import.py uses; interleaving
+	their keys would give a pose neither track has."""
+	by_index = {}
+	for track in anim.animations:
+		by_index.setdefault(getattr(track.index, "value", track.index), []).append(track)
+	tracks = []
+	for index, group in by_index.items():
+		if len(group) == 1:
+			tracks.append(group[0])
+			continue
+		states = []
+		for key_type, has in ((1, key_has_position), (2, key_has_rotation)):
+			last = next((t for t in reversed(group) if any(has(k) for k in t.states)), None)
+			for k in (last.states if last else []):
+				if has(k):
+					copy = bz2msh.AnimKey.from_buffer_copy(k)
+					copy.type = key_type
+					states.append(copy)
+		states.sort(key=lambda k: k.frame)
+		tracks.append(SimpleNamespace(index=group[0].index, states=states))
+	return tracks
+
 def sample_vec(keys, f):
 	if f <= keys[0][0]: return keys[0][1]
 	for (f0, a), (f1, b) in zip(keys, keys[1:]):
@@ -216,6 +246,7 @@ class Load:
 		self.texture_search_directories = [
 			self.filefolder,
 			os.path.join(self.filefolder, "bitmaps"),
+			os.path.join(self.filefolder, "textures"),
 		]
 		if self.tex_dir:
 			self.texture_search_directories.append(self.tex_dir)
@@ -391,11 +422,33 @@ class Load:
 		if extension == ".pic" and os.path.exists(resolved_path):
 			return self.load_softimage_pic(resolved_path)
 
-		return image_utils.load_image(
+		image = image_utils.load_image(
 			resolved_path,
 			place_holder=True,
 			check_existing=True
 		)
+		if extension == ".dds" and image is not None and not image.packed_file and tuple(image.size) == (0, 0) and os.path.exists(resolved_path):
+			image = self.load_bcn_dds(resolved_path, image) or image
+		return image
+
+	def load_bcn_dds(self, dds_path, failed_image):
+		"""BC4/BC5 DDS (BZCC normal maps are BC5_SNORM) load as an empty image in Blender:
+		decode them here into a packed image, BC5 normals with Z rebuilt."""
+		try:
+			pixels = bcn.decode_dds(dds_path)
+		except (OSError, ValueError) as e:
+			print(f"BC4/BC5 decode failed for {dds_path}: {e}")
+			return None
+		if pixels is None:
+			return None
+		name = failed_image.name
+		bpy.data.images.remove(failed_image)
+		height, width = pixels.shape[:2]
+		image = bpy.data.images.new(name, width, height, alpha=False, float_buffer=False)
+		image.pixels.foreach_set(pixels[::-1].ravel())  # Blender rows run bottom-up
+		image.pack()
+		image["bcn_source"] = dds_path
+		return image
 
 	def walk(self, mesh, bpy_parent=None):
 		bpy_obj = self.create_object(
@@ -417,21 +470,51 @@ class Load:
 
 	def apply_global_animations(self):
 		"""Object-transform clips: one Action per clip with a slot per animated object.
-		The first clip stays assigned; the others keep a fake user."""
+		The first clip stays assigned; the others keep a fake user.
+		A clip also keys the rest value of every channel it leaves unkeyed on objects that any
+		clip animates (e.g. location when it keys only rotation), at its first frame, so
+		switching clips never leaves a part in the previous clip's pose (the skinned path
+		does the same with its bones)."""
+		rest = {}
+		for bpy_obj in self.objects_by_state_index.values():
+			loc, rot, _ = bpy_obj.matrix_basis.decompose()
+			rest[bpy_obj.name] = (loc.copy(), rot.copy())
 		first = {}
+		clips = []
 		for block in self.msh.blocks:
 			if self.use_armature(block):
 				continue
 			for anim in getattr(block, "animation_list", []):
 				action = bpy.data.actions.new(name=f"{block.name}|{anim.name}")
 				action.use_fake_user = True
-				for sub_anim in anim.animations:
+				keyed, start = {}, None
+				for sub_anim in key_tracks(anim):
 					bpy_obj = self.find_node_by_index(sub_anim.index)
 					if bpy_obj:
 						self.apply_keyframes_to_object(bpy_obj, sub_anim, action)
 						first.setdefault(bpy_obj.name, (bpy_obj, action))
+						kinds = keyed.setdefault(bpy_obj.name, set())
+						for state in sub_anim.states:
+							if key_has_position(state): kinds.add("location")
+							if key_has_rotation(state): kinds.add("rotation_quaternion")
+							start = state.frame if start is None else min(start, state.frame)
+				clips.append((action, keyed, start or 0.0))
+		animated = {name for _, keyed, _ in clips for name in keyed}
+		for action, keyed, start in clips:
+			for name in animated:
+				missing = {"location", "rotation_quaternion"} - keyed.get(name, set())
+				if not missing: continue
+				bpy_obj = bpy.data.objects[name]
+				bpy_obj.rotation_mode = 'QUATERNION'
+				bpy_obj.animation_data.action = action
+				slot = next((sl for sl in action.slots if sl.name_display == name), None)
+				bpy_obj.animation_data.action_slot = slot or action.slots.new(id_type='OBJECT', name=name)
+				bpy_obj.location, bpy_obj.rotation_quaternion = rest[name]
+				for data_path in sorted(missing):
+					bpy_obj.keyframe_insert(data_path=data_path, frame=start)
+		# every animated object now has a slot in every clip: show the first clip on all of them
 		for bpy_obj, action in first.values():
-			self.assign_action(bpy_obj, action)
+			self.assign_action(bpy_obj, clips[0][0])
 
 	def assign_action(self, bpy_obj, action):
 		if not bpy_obj.animation_data: bpy_obj.animation_data_create()
@@ -474,7 +557,7 @@ class Load:
 			arm_obj.animation_data.action_slot = action.slots.new(id_type='OBJECT', name=arm_obj.name)
 			first = first or action
 			animated = set()
-			for sub_anim in anim.animations:
+			for sub_anim in key_tracks(anim):
 				i = getattr(sub_anim.index, "value", sub_anim.index)
 				if i not in bone_names: continue
 				animated.add(i)
@@ -653,26 +736,79 @@ class Load:
 		return arm_obj
 
 	def create_material(self, msh_mat, msh_tex):
-		name = msh_mat.name if msh_mat else "Default"
-		if name in self.existing_materials: return self.existing_materials[name]
-		
-		bpy_mat = bpy.data.materials.new(name=name)
-		bpy_mat.use_nodes = True
-		bpy_mat.blend_method = "HASHED"
-		nodes = bpy_mat.node_tree.nodes
-		bsdf = nodes["Principled BSDF"]
-		
-		def get_tex_path(tname):
-			return self.resolve_texture_path(tname)
-
+		"""MSH material -> Principled BSDF.  BZ2R/BZCC meshes name a .material file
+		(e.g. "fvtank_skel_1.material") whose [texture] section lists the diffuse, specular,
+		normal, emissive and team-colour maps; older meshes carry a single texture name.
+		Colours come from the msh material.  Unnamed materials differ only by colour, so they
+		are keyed by it rather than collapsed into one."""
+		name = msh_mat.name if msh_mat and msh_mat.name else None
 		tname = msh_tex.name if msh_tex else None
-		if tname:
-			path = get_tex_path(tname)
-			if path and os.path.exists(path):
-				tex_node = nodes.new("ShaderNodeTexImage")
-				tex_node.image = self.load_texture_image(path)
-				bpy_mat.node_tree.links.new(tex_node.outputs["Color"], bsdf.inputs["Base Color"])
-		
+		if name is None:
+			name = "Default" if msh_mat is None else "Solid_%02x%02x%02x" % tuple(
+				min(255, max(0, int(round(c * 255)))) for c in tuple(msh_mat.diffuse)[:3])
+			if tname: name += "_" + tname
+		if name in self.existing_materials: return self.existing_materials[name]
+
+		bpy_mat = bpy.data.materials.new(name=name)
+		if getattr(bpy_mat, "node_tree", None) is None:
+			bpy_mat.use_nodes = True
+		bpy_mat.blend_method = "HASHED"
+		tree = bpy_mat.node_tree
+		bsdf = next(n for n in tree.nodes if n.type == "BSDF_PRINCIPLED")
+		inputs = lambda *names: next((bsdf.inputs[n] for n in names if n in bsdf.inputs), None)
+		if msh_mat:
+			bsdf.inputs["Base Color"].default_value = tuple(msh_mat.diffuse)[:3] + (1.0,)
+			emissive = tuple(msh_mat.emissive)[:3]
+			if any(emissive):
+				inputs("Emission Color", "Emission").default_value = emissive + (1.0,)
+				inputs("Emission Strength").default_value = NODE_EMISSIVE_STRENGTH
+		bsdf.inputs["Roughness"].default_value = NODE_DEFAULT_ROUGHNESS
+
+		maps = {}
+		if name.casefold().endswith(".material"):
+			mat_path = find_texture(os.path.join(self.filefolder, name), self.texture_search_directories,
+				[".material"], self.opt["find_textures"])
+			if os.path.exists(mat_path):
+				maps = read_material_file(mat_path)
+			elif PRINT_TEXTURE_FINDER_INFO:
+				print(f"material file not found: {name}")
+		if tname and not maps.get("diffuse"):
+			maps["diffuse"] = tname
+
+		for which, tex in maps.items():
+			if not tex: continue
+			path = self.resolve_texture_path(tex)
+			if not os.path.exists(path): continue
+			image = self.load_texture_image(path)
+			if image is None: continue
+			node = tree.nodes.new("ShaderNodeTexImage")
+			node.image = image
+			node.label = f"{which}: {os.path.basename(path)}"
+			node.location = (-NODE_SPACING_X, NODE_HEIGHT.get(which, 0))
+			if which == "diffuse":
+				tree.links.new(node.outputs["Color"], bsdf.inputs["Base Color"])
+			elif which == "normal":
+				image.colorspace_settings.name = "Non-Color"
+				normal_map = tree.nodes.new("ShaderNodeNormalMap")
+				normal_map.location = (-NODE_SPACING_X / 2, NODE_HEIGHT[which])
+				normal_map.inputs["Strength"].default_value = NODE_NORMALMAP_STRENGTH
+				tree.links.new(node.outputs["Color"], normal_map.inputs["Color"])
+				tree.links.new(normal_map.outputs["Normal"], bsdf.inputs["Normal"])
+			elif which == "specular":
+				# colour = specular tint; alpha = glossiness (roughness = 1 - gloss)
+				image.colorspace_settings.name = "Non-Color"
+				tint = inputs("Specular Tint", "Specular")
+				if tint is not None:
+					tree.links.new(node.outputs["Color"], tint)
+				invert = tree.nodes.new("ShaderNodeInvert")
+				invert.location = (-NODE_SPACING_X / 2, NODE_HEIGHT[which])
+				tree.links.new(node.outputs["Alpha"], invert.inputs["Color"])
+				tree.links.new(invert.outputs["Color"], bsdf.inputs["Roughness"])
+			elif which == "emissive":
+				tree.links.new(node.outputs["Color"], inputs("Emission Color", "Emission"))
+				inputs("Emission Strength").default_value = NODE_EMISSIVE_STRENGTH
+			# teamcolor: no Principled input; kept as an unlinked node for baking a faction tint
+
 		self.existing_materials[name] = bpy_mat
 		return bpy_mat
 
