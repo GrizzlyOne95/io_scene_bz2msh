@@ -1,19 +1,27 @@
 schema_version = "1.0.0"
 
 id = "io_scene_bz2msh"
-version = "1.2.0"
+version = "1.3.0"
 name = "Battlezone II MSH Importer"
-tagline = "Modern BZ2 MSH suite with animation, PAK import, and PIC texture support."
+tagline = "Import Battlezone II MSH, PAK, animation, and texture data"
 maintainer = "GrizzlyOne95"
 type = "add-on"
+
+website = "https://github.com/GrizzlyOne95/io_scene_bz2msh"
+
 license = ["SPDX:MIT"]
-
-# Corrected field name for Blender 4.5 LTS
 blender_version_min = "4.5.0"
-
-[urls]
-homepage = "https://github.com/GrizzlyOne95/io_scene_bz2msh"
-issues = "https://github.com/GrizzlyOne95/io_scene_bz2msh/issues"
 
 [permissions]
 files = "Access local MSH/PAK files and decode or cache texture images"
+
+[build]
+paths = [
+  "__init__.py",
+  "blender_manifest.toml",
+  "bcn.py",
+  "bz2msh.py",
+  "bz2pak.py",
+  "msh_blender_importer.py",
+  "softimage_pic.py",
+]
