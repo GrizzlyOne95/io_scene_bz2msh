@@ -170,9 +170,15 @@ Official publication on `extensions.blender.org` is a separate licensing/provena
 - **Source assets:** Battlezone II and Battlezone: Combat Commander / BZ2 Redux MSH content
 - **Import sources:** loose `.msh` files and Battlezone II `.pak` archives
 
-## License
+## License and Provenance
 
-The current Blender manifest declares `SPDX:MIT`, matching the repository's existing licensing statement. However, neither this fork nor the original upstream repository currently contains a standalone license file. Licensing/provenance should be resolved before considering submission to Blender's official Extensions Platform.
+**Licensing provenance is currently unresolved for inherited upstream code.** The original `frute94/io_scene_bz2msh` repository has no license file or explicit license grant in its visible history. GitHub permits public repositories to be viewed and forked through GitHub, but that is not the same as an open-source redistribution/relicensing grant.
+
+The manifest still carries the fork's historical `SPDX:MIT` declaration so Blender can validate the development package, but this should **not** be interpreted as a verified license grant for the inherited frute94/ZerothDivision implementation.
+
+The planned resolution is a provenance-documented replacement of the remaining inherited implementation, after which the replacement can be explicitly licensed under `GPL-3.0-or-later` for possible submission to Blender's official Extensions Platform.
+
+See `docs/LICENSING_PROVENANCE.md` for the current status.
 
 ## Links
 
