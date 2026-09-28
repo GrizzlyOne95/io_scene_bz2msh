@@ -23,12 +23,12 @@ jobs:
           grep -F "\"version\": ($MAJOR, $MINOR, $PATCH)" __init__.py
 
       - name: Verify Python syntax
-        run: python -m py_compile __init__.py bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
+        run: python -m py_compile __init__.py bcn.py bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
 
       - name: Build Blender Extension ZIP
         shell: bash
         run: |
-          zip io_scene_bz2msh-${GITHUB_REF_NAME}.zip __init__.py blender_manifest.toml bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
+          zip io_scene_bz2msh-${GITHUB_REF_NAME}.zip __init__.py blender_manifest.toml bcn.py bz2msh.py bz2pak.py msh_blender_importer.py softimage_pic.py
           test "$(stat -c%s io_scene_bz2msh-${GITHUB_REF_NAME}.zip)" -gt 10000
           unzip -l io_scene_bz2msh-${GITHUB_REF_NAME}.zip | grep -F 'blender_manifest.toml'
           unzip -l io_scene_bz2msh-${GITHUB_REF_NAME}.zip | grep -F '__init__.py'

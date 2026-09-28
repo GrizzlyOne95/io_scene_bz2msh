@@ -12,6 +12,7 @@ if (-not (Test-Path $InstallDir)) {
 
 $files = @(
 	"__init__.py",
+	"bcn.py",
 	"blender_manifest.toml",
 	"bz2msh.py",
 	"bz2pak.py",
